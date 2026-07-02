@@ -1,0 +1,71 @@
+{
+  "accounts": [
+    {
+      "id": "email1",
+      "address": "user@gmail.com",
+      "label": "Personal Gmail",
+      "imap": {
+        "host": "imap.gmail.com",
+        "port": 993,
+        "tls": true
+      },
+      "smtp": {
+        "host": "smtp.gmail.com",
+        "port": 587,
+        "tls": true
+      },
+      "credentials_env": "EMAIL1_PASSWORD",
+      "folders": ["INBOX"],
+      "poll_interval_seconds": 60,
+      "enabled": true
+    },
+    {
+      "id": "email2",
+      "address": "user@company.com",
+      "label": "Work Gmail",
+      "imap": {
+        "host": "imap.gmail.com",
+        "port": 993,
+        "tls": true
+      },
+      "smtp": {
+        "host": "smtp.gmail.com",
+        "port": 587,
+        "tls": true
+      },
+      "credentials_env": "EMAIL2_PASSWORD",
+      "folders": ["INBOX"],
+      "poll_interval_seconds": 60,
+      "enabled": true
+    }
+  ],
+  "batching": {
+    "window_seconds": 30
+  },
+  "triage": {
+    "model": "deepseek-chat",
+    "provider": "deepseek",
+    "skills_dir": "/opt/data/skills/whatsapp-triage/",
+    "email_skills_dir": "/opt/data/skills/email-triage/",
+    "use_hermes_memory": true
+  },
+  "digest": {
+    "merge_with_whatsapp": true,
+    "frequency_minutes": 60,
+    "channel": "telegram"
+  },
+  "escalation": {
+    "push_to_telegram": true,
+    "criteria": {
+      "vip_senders": [],
+      "domain_rules": [],
+      "rules": [
+        "Any email from vip_senders -> escalate immediately",
+        "Client emails needing immediate response -> escalate",
+        "Sales/RFP/proposal deadlines within 24h -> escalate",
+        "Invoices and payment requests -> escalate",
+        "Auto-generated newsletters/marketing -> ignore"
+      ]
+    }
+  }
+}
