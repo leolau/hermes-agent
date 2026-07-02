@@ -19,6 +19,7 @@ from difflib import SequenceMatcher
 DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_USER_ID = os.environ.get('TELEGRAM_USER_ID', '')
+CALLBACK_SERVER_BASE = os.environ.get('CALLBACK_SERVER_BASE', 'http://8.217.86.90:7902')
 
 
 def get_db():
@@ -190,10 +191,13 @@ def send_merge_confirmation(db, suggestion_id, new_handle, new_name,
     text += f"\n{handles_text}\n"
     text += f"Reason: {reason}"
 
+    merge_url = f"{CALLBACK_SERVER_BASE}/action/merge/{suggestion_id}"
+    reject_url = f"{CALLBACK_SERVER_BASE}/action/reject/{suggestion_id}"
+
     reply_markup = {
         "inline_keyboard": [[
-            {"text": "\u2705 Merge", "callback_data": f"merge:{suggestion_id}"},
-            {"text": "\u274c Keep Separate", "callback_data": f"reject:{suggestion_id}"}
+            {"text": "\u2705 Merge", "url": merge_url},
+            {"text": "\u274c Keep Separate", "url": reject_url}
         ]]
     }
 

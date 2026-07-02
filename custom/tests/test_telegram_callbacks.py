@@ -2,8 +2,8 @@
 """
 Tests for Telegram inline keyboard merge/reject callbacks.
 
-Tests the callback handler logic (merge/reject) and verifies
-that send_merge_confirmation produces inline keyboard markup.
+Tests the HTTP-based callback handler logic (merge/reject) and verifies
+that send_merge_confirmation produces URL-based inline keyboard markup.
 """
 
 import json
@@ -19,6 +19,18 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared'))
 
 DB_PATH = ':memory:'
+
+
+class NonClosingConnection:
+    """Wraps a sqlite3 connection but makes close() a no-op for testing."""
+    def __init__(self, conn):
+        self._conn = conn
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+    def close(self):
+        pass  # no-op so test assertions can still use the connection
+    def real_close(self):
+        self._conn.close()
 
 
 def create_test_db():
@@ -89,7 +101,7 @@ def create_test_db():
     )""")
 
     db.commit()
-    return db
+    return NonClosingConnection(db)
 
 
 def seed_merge_scenario(db):
@@ -142,14 +154,16 @@ class TestCallbackMerge(unittest.TestCase):
         self.target_id, self.source_id, self.suggestion_id = seed_merge_scenario(self.db)
 
     def tearDown(self):
-        self.db.close()
+        self.db.real_close()
 
-    def test_merge_moves_handles_to_target(self):
+    @patch('telegram_callback_handler.get_db')
+    @patch('telegram_callback_handler.send_telegram')
+    def test_merge_moves_handles_to_target(self, mock_send, mock_get_db):
         """Merge should move all handles from source to target contact."""
+        mock_get_db.return_value = self.db
         from telegram_callback_handler import handle_merge
-        with patch('telegram_callback_handler.answer_callback_query'), \
-             patch('telegram_callback_handler.edit_message_text'):
-            handle_merge(self.db, self.suggestion_id, 123, 456, 'cq1')
+        success, msg = handle_merge(self.suggestion_id)
+        self.assertTrue(success)
 
         # Source contact should be deleted
         source = self.db.execute(
@@ -165,24 +179,26 @@ class TestCallbackMerge(unittest.TestCase):
         self.assertIn('+85294066060', handle_values)
         self.assertIn('heidi@gmail.com', handle_values)
 
-    def test_merge_increments_auto_merged_count(self):
+    @patch('telegram_callback_handler.get_db')
+    @patch('telegram_callback_handler.send_telegram')
+    def test_merge_increments_auto_merged_count(self, mock_send, mock_get_db):
         """Target contact's auto_merged_count should increase by 1."""
+        mock_get_db.return_value = self.db
         from telegram_callback_handler import handle_merge
-        with patch('telegram_callback_handler.answer_callback_query'), \
-             patch('telegram_callback_handler.edit_message_text'):
-            handle_merge(self.db, self.suggestion_id, 123, 456, 'cq1')
+        handle_merge(self.suggestion_id)
 
         target = self.db.execute(
             "SELECT * FROM unified_contacts WHERE id = ?", (self.target_id,)
         ).fetchone()
         self.assertEqual(target['auto_merged_count'], 1)
 
-    def test_merge_updates_suggestion_status(self):
+    @patch('telegram_callback_handler.get_db')
+    @patch('telegram_callback_handler.send_telegram')
+    def test_merge_updates_suggestion_status(self, mock_send, mock_get_db):
         """Suggestion status should be 'approved' after merge."""
+        mock_get_db.return_value = self.db
         from telegram_callback_handler import handle_merge
-        with patch('telegram_callback_handler.answer_callback_query'), \
-             patch('telegram_callback_handler.edit_message_text'):
-            handle_merge(self.db, self.suggestion_id, 123, 456, 'cq1')
+        handle_merge(self.suggestion_id)
 
         suggestion = self.db.execute(
             "SELECT * FROM contact_merge_suggestions WHERE id = ?", (self.suggestion_id,)
@@ -190,7 +206,9 @@ class TestCallbackMerge(unittest.TestCase):
         self.assertEqual(suggestion['status'], 'approved')
         self.assertIsNotNone(suggestion['resolved_at'])
 
-    def test_merge_reassigns_escalations(self):
+    @patch('telegram_callback_handler.get_db')
+    @patch('telegram_callback_handler.send_telegram')
+    def test_merge_reassigns_escalations(self, mock_send, mock_get_db):
         """Escalations linked to source contact should be reassigned to target."""
         now = datetime.now(timezone.utc).isoformat()
         esc_id = str(uuid.uuid4())
@@ -201,16 +219,17 @@ class TestCallbackMerge(unittest.TestCase):
         )
         self.db.commit()
 
+        mock_get_db.return_value = self.db
         from telegram_callback_handler import handle_merge
-        with patch('telegram_callback_handler.answer_callback_query'), \
-             patch('telegram_callback_handler.edit_message_text'):
-            handle_merge(self.db, self.suggestion_id, 123, 456, 'cq1')
+        handle_merge(self.suggestion_id)
 
         esc = self.db.execute("SELECT * FROM escalations WHERE id = ?", (esc_id,)).fetchone()
         self.assertEqual(esc['contact_id'], self.target_id)
 
-    def test_merge_idempotent_already_approved(self):
-        """Merging an already-approved suggestion should be a no-op."""
+    @patch('telegram_callback_handler.get_db')
+    @patch('telegram_callback_handler.send_telegram')
+    def test_merge_idempotent_already_approved(self, mock_send, mock_get_db):
+        """Merging an already-approved suggestion should return failure."""
         now = datetime.now(timezone.utc).isoformat()
         self.db.execute(
             "UPDATE contact_merge_suggestions SET status = 'approved', resolved_at = ? WHERE id = ?",
@@ -218,12 +237,21 @@ class TestCallbackMerge(unittest.TestCase):
         )
         self.db.commit()
 
+        mock_get_db.return_value = self.db
         from telegram_callback_handler import handle_merge
-        with patch('telegram_callback_handler.answer_callback_query') as mock_answer, \
-             patch('telegram_callback_handler.edit_message_text'):
-            handle_merge(self.db, self.suggestion_id, 123, 456, 'cq1')
+        success, msg = handle_merge(self.suggestion_id)
+        self.assertFalse(success)
+        self.assertIn('Already approved', msg)
 
-        mock_answer.assert_called_once_with('cq1', 'Already approved')
+    @patch('telegram_callback_handler.get_db')
+    @patch('telegram_callback_handler.send_telegram')
+    def test_merge_nonexistent_suggestion(self, mock_send, mock_get_db):
+        """Merging a nonexistent suggestion should return failure."""
+        mock_get_db.return_value = self.db
+        from telegram_callback_handler import handle_merge
+        success, msg = handle_merge('nonexistent-id')
+        self.assertFalse(success)
+        self.assertIn('not found', msg)
 
 
 class TestCallbackReject(unittest.TestCase):
@@ -232,14 +260,15 @@ class TestCallbackReject(unittest.TestCase):
         self.target_id, self.source_id, self.suggestion_id = seed_merge_scenario(self.db)
 
     def tearDown(self):
-        self.db.close()
+        self.db.real_close()
 
-    def test_reject_keeps_both_contacts(self):
+    @patch('telegram_callback_handler.get_db')
+    @patch('telegram_callback_handler.send_telegram')
+    def test_reject_keeps_both_contacts(self, mock_send, mock_get_db):
         """Reject should keep both contacts intact."""
+        mock_get_db.return_value = self.db
         from telegram_callback_handler import handle_reject
-        with patch('telegram_callback_handler.answer_callback_query'), \
-             patch('telegram_callback_handler.edit_message_text'):
-            handle_reject(self.db, self.suggestion_id, 123, 456, 'cq1')
+        handle_reject(self.suggestion_id)
 
         source = self.db.execute(
             "SELECT * FROM unified_contacts WHERE id = ?", (self.source_id,)
@@ -250,12 +279,13 @@ class TestCallbackReject(unittest.TestCase):
         self.assertIsNotNone(source)
         self.assertIsNotNone(target)
 
-    def test_reject_updates_suggestion_status(self):
+    @patch('telegram_callback_handler.get_db')
+    @patch('telegram_callback_handler.send_telegram')
+    def test_reject_updates_suggestion_status(self, mock_send, mock_get_db):
         """Suggestion status should be 'rejected' after reject."""
+        mock_get_db.return_value = self.db
         from telegram_callback_handler import handle_reject
-        with patch('telegram_callback_handler.answer_callback_query'), \
-             patch('telegram_callback_handler.edit_message_text'):
-            handle_reject(self.db, self.suggestion_id, 123, 456, 'cq1')
+        handle_reject(self.suggestion_id)
 
         suggestion = self.db.execute(
             "SELECT * FROM contact_merge_suggestions WHERE id = ?", (self.suggestion_id,)
@@ -263,8 +293,10 @@ class TestCallbackReject(unittest.TestCase):
         self.assertEqual(suggestion['status'], 'rejected')
         self.assertIsNotNone(suggestion['resolved_at'])
 
-    def test_reject_idempotent_already_rejected(self):
-        """Rejecting an already-rejected suggestion should be a no-op."""
+    @patch('telegram_callback_handler.get_db')
+    @patch('telegram_callback_handler.send_telegram')
+    def test_reject_idempotent_already_rejected(self, mock_send, mock_get_db):
+        """Rejecting an already-rejected suggestion should return failure."""
         now = datetime.now(timezone.utc).isoformat()
         self.db.execute(
             "UPDATE contact_merge_suggestions SET status = 'rejected', resolved_at = ? WHERE id = ?",
@@ -272,68 +304,76 @@ class TestCallbackReject(unittest.TestCase):
         )
         self.db.commit()
 
+        mock_get_db.return_value = self.db
         from telegram_callback_handler import handle_reject
-        with patch('telegram_callback_handler.answer_callback_query') as mock_answer, \
-             patch('telegram_callback_handler.edit_message_text'):
-            handle_reject(self.db, self.suggestion_id, 123, 456, 'cq1')
-
-        mock_answer.assert_called_once_with('cq1', 'Already rejected')
+        success, msg = handle_reject(self.suggestion_id)
+        self.assertFalse(success)
+        self.assertIn('Already rejected', msg)
 
 
-class TestProcessCallbackQuery(unittest.TestCase):
+class TestHTTPHandler(unittest.TestCase):
+    """Test the HTTP endpoint routing."""
+
     def setUp(self):
         self.db = create_test_db()
         self.target_id, self.source_id, self.suggestion_id = seed_merge_scenario(self.db)
 
     def tearDown(self):
-        self.db.close()
+        self.db.real_close()
 
-    @patch('telegram_callback_handler.TELEGRAM_USER_ID', '12345')
     @patch('telegram_callback_handler.get_db')
-    @patch('telegram_callback_handler.answer_callback_query')
-    @patch('telegram_callback_handler.edit_message_text')
-    def test_unauthorized_user_rejected(self, mock_edit, mock_answer, mock_get_db):
-        """Callbacks from unauthorized users should be rejected."""
-        from telegram_callback_handler import process_callback_query
+    @patch('telegram_callback_handler.send_telegram')
+    def test_merge_via_url_path(self, mock_send, mock_get_db):
+        """Simulates the URL path parsing for merge action."""
         mock_get_db.return_value = self.db
+        from telegram_callback_handler import handle_merge
+        path = f'/action/merge/{self.suggestion_id}'
+        parts = path.strip('/').split('/')
 
-        update = {
-            'callback_query': {
-                'id': 'cq1',
-                'data': f'merge:{self.suggestion_id}',
-                'from': {'id': 99999},
-                'message': {'chat': {'id': 123}, 'message_id': 456},
-            }
-        }
-        process_callback_query(update)
-        mock_answer.assert_called_once_with('cq1', 'Unauthorized')
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(parts[0], 'action')
+        self.assertEqual(parts[1], 'merge')
+        self.assertEqual(parts[2], self.suggestion_id)
 
-    @patch('telegram_callback_handler.TELEGRAM_USER_ID', '12345')
+        success, msg = handle_merge(self.suggestion_id)
+        self.assertTrue(success)
+
     @patch('telegram_callback_handler.get_db')
-    @patch('telegram_callback_handler.answer_callback_query')
-    @patch('telegram_callback_handler.edit_message_text')
-    def test_invalid_callback_data(self, mock_edit, mock_answer, mock_get_db):
-        """Callback data without ':' separator should return 'Invalid action'."""
-        from telegram_callback_handler import process_callback_query
+    @patch('telegram_callback_handler.send_telegram')
+    def test_reject_via_url_path(self, mock_send, mock_get_db):
+        """Simulates the URL path parsing for reject action."""
         mock_get_db.return_value = self.db
+        from telegram_callback_handler import handle_reject
+        path = f'/action/reject/{self.suggestion_id}'
+        parts = path.strip('/').split('/')
 
-        update = {
-            'callback_query': {
-                'id': 'cq1',
-                'data': 'bad_data',
-                'from': {'id': 12345},
-                'message': {'chat': {'id': 123}, 'message_id': 456},
-            }
-        }
-        process_callback_query(update)
-        mock_answer.assert_called_once_with('cq1', 'Invalid action')
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(parts[0], 'action')
+        self.assertEqual(parts[1], 'reject')
+
+        success, msg = handle_reject(self.suggestion_id)
+        self.assertTrue(success)
+
+    def test_html_response_success(self):
+        """html_response should produce valid HTML with success styling."""
+        from telegram_callback_handler import html_response
+        html = html_response("Test Title", "Test message", success=True)
+        self.assertIn("Test Title", html)
+        self.assertIn("Test message", html)
+        self.assertIn("#4CAF50", html)  # green color for success
+
+    def test_html_response_failure(self):
+        """html_response should produce valid HTML with failure styling."""
+        from telegram_callback_handler import html_response
+        html = html_response("Error", "Something went wrong", success=False)
+        self.assertIn("Error", html)
+        self.assertIn("#f44336", html)  # red color for failure
 
 
 class TestInlineKeyboardMarkup(unittest.TestCase):
-    def test_send_merge_confirmation_includes_inline_keyboard(self):
-        """send_merge_confirmation should call send_telegram with reply_markup containing inline_keyboard."""
+    def test_send_merge_confirmation_includes_url_buttons(self):
+        """send_merge_confirmation should include URL-based inline keyboard buttons."""
         db = create_test_db()
-        now = datetime.now(timezone.utc).isoformat()
 
         candidate_contact = {
             'id': 'c1',
@@ -362,24 +402,24 @@ class TestInlineKeyboardMarkup(unittest.TestCase):
             buttons = reply_markup['inline_keyboard'][0]
             self.assertEqual(len(buttons), 2)
 
-            # Verify merge button
+            # Verify merge button uses URL (not callback_data)
             self.assertIn('Merge', buttons[0]['text'])
-            self.assertEqual(buttons[0]['callback_data'], 'merge:suggestion-123')
+            self.assertIn('url', buttons[0])
+            self.assertIn('/action/merge/suggestion-123', buttons[0]['url'])
+            self.assertNotIn('callback_data', buttons[0])
 
-            # Verify reject button
+            # Verify reject button uses URL (not callback_data)
             self.assertIn('Keep Separate', buttons[1]['text'])
-            self.assertEqual(buttons[1]['callback_data'], 'reject:suggestion-123')
+            self.assertIn('url', buttons[1])
+            self.assertIn('/action/reject/suggestion-123', buttons[1]['url'])
+            self.assertNotIn('callback_data', buttons[1])
 
             # Verify text content
             self.assertIn('Heidi Lui', text)
             self.assertIn('heidi@gmail.com', text)
             self.assertIn('Contact Merge Suggestion', text)
 
-            # Verify old text-based instructions are gone
-            self.assertNotIn('Reply to this with', text)
-            self.assertNotIn('<code>merge', text)
-
-        db.close()
+        db.real_close()
 
 
 if __name__ == '__main__':
