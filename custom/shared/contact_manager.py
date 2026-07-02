@@ -28,15 +28,18 @@ def get_db():
     return conn
 
 
-def send_telegram(text):
+def send_telegram(text, reply_markup=None):
     """Send a message to the user via Telegram."""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = json.dumps({
+        payload = {
             "chat_id": TELEGRAM_USER_ID,
             "text": text,
             "parse_mode": "HTML"
-        }).encode()
+        }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        data = json.dumps(payload).encode()
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
         urllib.request.urlopen(req, timeout=10)
         return True
@@ -164,7 +167,7 @@ def auto_merge(db, source_contact_id, target_contact_id):
 
 def send_merge_confirmation(db, suggestion_id, new_handle, new_name,
                            candidate_contact, candidate_handles, reason):
-    """Send Telegram message asking user to confirm merge."""
+    """Send Telegram message with inline keyboard buttons to confirm/reject merge."""
     handles_text = ""
     for h in candidate_handles:
         icon = "\U0001f4f1" if h['handle_type'] == 'phone' else "\U0001f4e7"
@@ -185,12 +188,16 @@ def send_merge_confirmation(db, suggestion_id, new_handle, new_name,
         text += " [family]"
 
     text += f"\n{handles_text}\n"
-    text += f"Reason: {reason}\n\n"
-    text += f"Reply to this with:\n"
-    text += f'  "<code>merge {suggestion_id[:8]}</code>" to merge\n'
-    text += f'  "<code>no {suggestion_id[:8]}</code>" to keep separate'
+    text += f"Reason: {reason}"
 
-    send_telegram(text)
+    reply_markup = {
+        "inline_keyboard": [[
+            {"text": "\u2705 Merge", "callback_data": f"merge:{suggestion_id}"},
+            {"text": "\u274c Keep Separate", "callback_data": f"reject:{suggestion_id}"}
+        ]]
+    }
+
+    send_telegram(text, reply_markup=reply_markup)
 
 
 def process_new_handle(db, handle_type, handle_value, display_name, source, message_text=None):
