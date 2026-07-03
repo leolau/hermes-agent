@@ -67,5 +67,42 @@
         "Auto-generated newsletters/marketing -> ignore"
       ]
     }
+  },
+  "calendar": {
+    "accounts": [
+      {
+        "id": "gcal1",
+        "email": "user@gmail.com",
+        "label": "Personal",
+        "refresh_token_env": "GCAL_REFRESH_TOKEN_1",
+        "calendars": ["primary"],
+        "poll_interval_seconds": 60,
+        "enabled": true
+      },
+      {
+        "id": "gcal2",
+        "email": "user@company.com",
+        "label": "Work",
+        "refresh_token_env": "GCAL_REFRESH_TOKEN_2",
+        "calendars": ["primary"],
+        "poll_interval_seconds": 60,
+        "enabled": true
+      }
+    ],
+    "reminders": {
+      "critical": [1440, 60, 15],
+      "normal": [60, 15],
+      "low": [15]
+    },
+    "working_hours": {
+      "start": "09:00",
+      "end": "19:00",
+      "timezone": "Asia/Hong_Kong"
+    },
+    "triage": {
+      "model": "deepseek-chat",
+      "provider": "deepseek",
+      "skills_dir": "/opt/data/skills/calendar-triage/"
+    }
   }
 }
