@@ -18,6 +18,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+# Credit tracking
+sys.path.insert(0, '/opt/data')
+from track_credit_helper import track_inference
+
 # Paths
 EMAIL_CONFIG_PATH = '/opt/data/email-messages/config.json'
 DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
@@ -88,9 +92,11 @@ def call_deepseek(messages, temperature=0.3, max_tokens=2000):
     )
 
     try:
-        resp = urlopen(req, timeout=60)
-        data = json.loads(resp.read().decode())
-        return data['choices'][0]['message']['content']
+        def _do_api_call():
+            resp = urlopen(req, timeout=60)
+            data = json.loads(resp.read().decode())
+            return data['choices'][0]['message']['content']
+        return track_inference("Email processing", _do_api_call)
     except Exception as e:
         print(f"[email-triage] DeepSeek API error: {e}")
         return None

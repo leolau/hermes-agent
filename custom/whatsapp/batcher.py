@@ -60,32 +60,52 @@ _pending_batches = {}  # key: "sender_phone:source_phone" -> { batch_id, message
 
 
 def extract_sender_phone(msg):
-    """Extract sender phone from WhatsApp message."""
+    """Extract sender phone from WhatsApp message.
+    
+    Handles both the bridge's normalized format (senderId, chatId)
+    and raw Baileys format (key.remoteJid, key.participant).
+    """
+    # Bridge normalized format
+    sender_id = msg.get('senderId', '')
+    if sender_id:
+        match = sender_id.split('@')[0] if '@' in sender_id else sender_id
+        digits = ''.join(c for c in match if c.isdigit())
+        return f'+{digits}' if digits else sender_id
+
+    # Raw Baileys format fallback
     key = msg.get('key', {})
     remote_jid = key.get('remoteJid', '')
     
     if '@g.us' in remote_jid:
-        # Group message - use participant
         participant = key.get('participant', '') or msg.get('participant', '') or remote_jid
         match = participant.split('@')[0] if '@' in participant else participant
     else:
         match = remote_jid.split('@')[0] if '@' in remote_jid else remote_jid
     
-    # Clean up and add + prefix
     digits = ''.join(c for c in match if c.isdigit())
     return f'+{digits}' if digits else remote_jid
 
 
 def extract_chat_id(msg):
-    return msg.get('key', {}).get('remoteJid', '')
+    return msg.get('chatId', '') or msg.get('key', {}).get('remoteJid', '')
 
 
 def is_group_message(msg):
+    # Bridge normalized format
+    if 'isGroup' in msg:
+        return bool(msg['isGroup'])
+    # Raw Baileys format fallback
     jid = msg.get('key', {}).get('remoteJid', '')
     return '@g.us' in jid
 
 
 def extract_text(msg):
+    # Bridge normalized format
+    body = msg.get('body', '')
+    if body:
+        return body
+
+    # Raw Baileys format fallback
     m = msg.get('message', {})
     if not m:
         return ''
@@ -100,6 +120,12 @@ def extract_text(msg):
 
 
 def extract_media_info(msg):
+    # Bridge normalized format
+    if msg.get('hasMedia'):
+        media_type = msg.get('mediaType', '') or None
+        return media_type, None
+
+    # Raw Baileys format fallback
     m = msg.get('message', {})
     if not m:
         return None, None
@@ -112,12 +138,12 @@ def extract_media_info(msg):
 
 
 def get_sender_name(msg):
-    return msg.get('pushName') or msg.get('verifiedBizName') or None
+    return msg.get('senderName') or msg.get('pushName') or msg.get('verifiedBizName') or None
 
 
 def process_message(msg, source_phone):
     """Process a single message: write to DB and add to batch."""
-    msg_id = msg.get('key', {}).get('id', str(uuid.uuid4()))
+    msg_id = msg.get('messageId') or msg.get('key', {}).get('id') or str(uuid.uuid4())
     sender_phone = extract_sender_phone(msg)
     sender_name = get_sender_name(msg)
     chat_id = extract_chat_id(msg)
@@ -125,9 +151,12 @@ def process_message(msg, source_phone):
     text = extract_text(msg)
     media_type, media_mimetype = extract_media_info(msg)
     
-    ts = msg.get('messageTimestamp')
+    ts = msg.get('timestamp') or msg.get('messageTimestamp')
     if ts:
-        timestamp = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+        try:
+            timestamp = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+        except (ValueError, OSError):
+            timestamp = datetime.now(timezone.utc).isoformat()
     else:
         timestamp = datetime.now(timezone.utc).isoformat()
     

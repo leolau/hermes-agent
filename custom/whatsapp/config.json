@@ -1,0 +1,56 @@
+{
+  "phones": [
+    {
+      "id": "phone1",
+      "number": "+852****2892",
+      "label": "Phone 1",
+      "bridge_port": 3000,
+      "session_dir": "/opt/data/platforms/whatsapp/session-phone1",
+      "enabled": true
+    },
+    {
+      "id": "phone2",
+      "number": "+852****0978",
+      "label": "Phone 2",
+      "bridge_port": 3001,
+      "session_dir": "/opt/data/platforms/whatsapp/session-phone2",
+      "enabled": true
+    }
+  ],
+  "batching": {
+    "window_seconds": 5
+  },
+  "triage": {
+    "model": "deepseek-chat",
+    "provider": "deepseek",
+    "skills_dir": "/opt/data/skills/whatsapp-triage/",
+    "custom_skills_dir": "/opt/data/skills/whatsapp-triage/custom/",
+    "use_hermes_memory": true
+  },
+  "digest": {
+    "frequency_minutes": 60,
+    "channel": "telegram"
+  },
+  "escalation": {
+    "push_to_telegram": true,
+    "criteria": {
+      "family_contacts": [
+        {"name": "Heidi Lui", "relation": "Wife", "phone": "+852****6060"},
+        {"name": "Mokan Lau", "relation": "Elder Son", "phone": "+852****5796"},
+        {"name": "Mowan Lau", "relation": "Younger Son", "phone": "+852****8528"},
+        {"name": "Anna Hau", "relation": "Mother", "phone": "+141****9963"},
+        {"name": "Andrew Lau", "relation": "Brother", "phone": "+852****6600"},
+        {"name": "Jay Lau", "relation": "Sister-in-law", "phone": "+852****8510"}
+      ],
+      "rules": [
+        "Any message from family_contacts -> escalate immediately",
+        "Business requests needing immediate attention -> escalate",
+        "Sales opportunities needing immediate attention -> escalate"
+      ]
+    }
+  },
+  "mcp_server": {
+    "port": 8650,
+    "transport": "sse"
+  }
+}
