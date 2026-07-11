@@ -156,6 +156,26 @@ class SessionSource:
     # namespacing and the per-turn config/credential scope.
     profile: Optional[str] = None
 
+    # --- Contract C4 (FG-03 multi-channel redesign; decision D7) ---------------
+    # The receiving-inbox identity: WHICH of my accounts took this message in
+    # (a specific WhatsApp number / email inbox / calendar), NOT the sender.
+    # One shared brain serves every channel, so per-account conversations must
+    # not collide on a shared sender ``chat_id`` and egress replies must leave
+    # via the correct account. Folded into ``build_session_key`` when set;
+    # ``None`` keeps keys byte-identical for existing single-account callers.
+    account_id: Optional[str] = None
+    # The resolved *internal* system user (Principal.user_id from the C1
+    # ``resolve_principal`` seam), distinct from the channel-native ``user_id``.
+    # Folds into the session key so each internal user gets an isolated,
+    # prompt-cache-friendly core even when several channel identities map to the
+    # same person. ``None`` => omitted (byte-stable for existing callers).
+    internal_user_id: Optional[str] = None
+    # The task/goal dimension: a long-lived ``(user, task)`` pair gets one
+    # stable session so its cached prompt prefix is reused across turns, and
+    # different tasks never share a cached prefix. Consumed by FG-06/FG-09.
+    # ``None`` => omitted (byte-stable for existing callers).
+    task: Optional[str] = None
+
     # Internal, wire-INVISIBLE trust signal: True when this event was delivered
     # to the gateway over the per-instance-authenticated relay WebSocket (the
     # Team Gateway connector). The connector authenticates the gateway's socket
@@ -238,6 +258,14 @@ class SessionSource:
             d["message_id"] = self.message_id
         if self.profile:
             d["profile"] = self.profile
+        # C4 dimensions are emitted only when set, so persisted sessions.json
+        # entries for existing single-account callers stay byte-identical.
+        if self.account_id:
+            d["account_id"] = self.account_id
+        if self.internal_user_id:
+            d["internal_user_id"] = self.internal_user_id
+        if self.task:
+            d["task"] = self.task
         return d
 
     @classmethod
@@ -259,6 +287,9 @@ class SessionSource:
             parent_chat_id=data.get("parent_chat_id"),
             message_id=data.get("message_id"),
             profile=data.get("profile"),
+            account_id=data.get("account_id"),
+            internal_user_id=data.get("internal_user_id"),
+            task=data.get("task"),
         )
     
 
@@ -789,39 +820,47 @@ def _session_key_namespace(profile: Optional[str]) -> str:
     return f"agent:{profile}"
 
 
-def build_session_key(
+#: Fixed label order for the contract-C4 session-key dimensions. Each is
+#: appended (only when set) as ``:{label}:{value}`` AFTER the historical key,
+#: so single-account callers — which set none of them — get byte-identical
+#: keys, while existing positional parsers (``parts[2]`` == platform, etc.)
+#: that read the leading segments are unaffected.
+_C4_DIMENSION_LABELS = ("acct", "usr", "task")
+
+
+def _c4_dimension_segment(label: str, value: Optional[str]) -> str:
+    """Return ``:{label}:{value}`` for a set C4 dimension, else ``""``.
+
+    Session keys flow into filesystem paths downstream (``sessions_dir /
+    f"{session_id}.json"``), so a channel-supplied ``account_id`` / ``task``
+    is made path-safe here: separators and parent refs are neutralised while
+    the rest is preserved so the key stays human-readable and 1:1 with the
+    dimension value. An unset/blank value contributes nothing (byte-stable).
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    text = text.replace("\\", "_").replace("/", "_")
+    while ".." in text:
+        text = text.replace("..", "_")
+    return f":{label}:{text}"
+
+
+def _base_session_key(
     source: SessionSource,
     group_sessions_per_user: bool = True,
     thread_sessions_per_user: bool = False,
     profile: Optional[str] = None,
 ) -> str:
-    """Build a deterministic session key from a message source.
+    """Pre-C4 session key from channel identity only (see :func:`build_session_key`).
 
-    This is the single source of truth for session key construction.
-
-    ``profile`` selects the key namespace (see :func:`_session_key_namespace`).
-    It defaults to ``None`` ⇒ the legacy ``agent:main`` namespace, so callers
-    that don't multiplex produce byte-identical keys to before. Only the
-    multiplexing gateway passes a non-default profile.
-
-    DM rules:
-      - DMs include chat_id when present, so each private conversation is isolated.
-      - thread_id further differentiates threaded DMs within the same DM chat.
-      - Without chat_id, thread_id is used as a best-effort fallback.
-      - Without thread_id or chat_id, DMs share a single session.
-
-    Group/channel rules:
-      - chat_id identifies the parent group/channel.
-      - user_id/user_id_alt isolates participants within that parent chat when available when
-        ``group_sessions_per_user`` is enabled.
-      - thread_id differentiates threads within that parent chat.  When
-        ``thread_sessions_per_user`` is False (default), threads are *shared* across all
-        participants — user_id is NOT appended, so every user in the thread
-        shares a single session.  This is the expected UX for threaded
-        conversations (Telegram forum topics, Discord threads, Slack threads).
-      - Without participant identifiers, or when isolation is disabled, messages fall back to one
-        shared session per chat.
-      - Without identifiers, messages fall back to one session per platform/chat_type.
+    This is the historical builder — channel identity + profile namespace, with
+    the DM / group / thread isolation rules documented on
+    :func:`build_session_key`. It is kept byte-for-byte so the public builder can
+    layer the additive C4 ``account_id``/``internal_user_id``/``task`` dimensions
+    on top without perturbing existing keys.
     """
     ns = _session_key_namespace(profile)
     platform = source.platform.value
@@ -878,6 +917,82 @@ def build_session_key(
         key_parts.append(str(participant_id))
 
     return ":".join(key_parts)
+
+
+def build_session_key(
+    source: SessionSource,
+    group_sessions_per_user: bool = True,
+    thread_sessions_per_user: bool = False,
+    profile: Optional[str] = None,
+    *,
+    account_id: Optional[str] = None,
+    internal_user_id: Optional[str] = None,
+    task: Optional[str] = None,
+) -> str:
+    """Build a deterministic session key from a message source (contract C4).
+
+    This is the single source of truth for session key construction.
+
+    ``profile`` selects the key namespace (see :func:`_session_key_namespace`).
+    It defaults to ``None`` ⇒ the legacy ``agent:main`` namespace, so callers
+    that don't multiplex produce byte-identical keys to before. Only the
+    multiplexing gateway passes a non-default profile.
+
+    **Contract C4 (decision D7):** the internal ``session_key`` is
+    ``f(channel identity, account_id, internal user, task)``. The
+    ``account_id`` / ``internal_user_id`` / ``task`` dimensions are read from
+    the matching :class:`SessionSource` fields (an explicit keyword argument
+    overrides the field when given) and folded in as trailing
+    ``:acct:/:usr:/:task:`` segments. Because they are appended **only when
+    set**, a single-account caller — which supplies none of them — gets a
+    **byte-identical** key to the pre-C4 builder (regression-locked by
+    ``tests/plan_baseline/test_session_key_baseline.py``). When set, two
+    accounts, two internal users, or two tasks never collapse onto one cached
+    core, and each ``(user, task)`` keeps one long-lived, prompt-cache-friendly
+    session.
+
+    DM rules:
+      - DMs include chat_id when present, so each private conversation is isolated.
+      - thread_id further differentiates threaded DMs within the same DM chat.
+      - Without chat_id, thread_id is used as a best-effort fallback.
+      - Without thread_id or chat_id, DMs share a single session.
+
+    Group/channel rules:
+      - chat_id identifies the parent group/channel.
+      - user_id/user_id_alt isolates participants within that parent chat when available when
+        ``group_sessions_per_user`` is enabled.
+      - thread_id differentiates threads within that parent chat.  When
+        ``thread_sessions_per_user`` is False (default), threads are *shared* across all
+        participants — user_id is NOT appended, so every user in the thread
+        shares a single session.  This is the expected UX for threaded
+        conversations (Telegram forum topics, Discord threads, Slack threads).
+      - Without participant identifiers, or when isolation is disabled, messages fall back to one
+        shared session per chat.
+      - Without identifiers, messages fall back to one session per platform/chat_type.
+    """
+    base_key = _base_session_key(
+        source,
+        group_sessions_per_user=group_sessions_per_user,
+        thread_sessions_per_user=thread_sessions_per_user,
+        profile=profile,
+    )
+
+    # C4 dimensions: an explicit keyword argument wins, else read the source
+    # field. Each is appended only when set, so a single-account caller that
+    # passes/sets none of them gets the byte-identical pre-C4 key above.
+    account_id = account_id if account_id is not None else source.account_id
+    internal_user_id = (
+        internal_user_id if internal_user_id is not None else source.internal_user_id
+    )
+    task = task if task is not None else source.task
+
+    for label, value in zip(
+        _C4_DIMENSION_LABELS,
+        (account_id, internal_user_id, task),
+    ):
+        base_key += _c4_dimension_segment(label, value)
+
+    return base_key
 
 
 class SessionStore:
