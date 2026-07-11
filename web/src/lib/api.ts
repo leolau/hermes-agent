@@ -1191,7 +1191,139 @@ export const api = {
     fetchJSON<SkillHubScan>(
       `/api/skills/hub/scan?identifier=${encodeURIComponent(identifier)}`,
     ),
+
+  // ── FG-10 human comms (Telegram + web parity) ──────────────────────────
+  // C1-authenticated, C2-scoped reads; approvals/asks are one shared surface
+  // de-duplicated with Telegram (answering here clears the Telegram item).
+  getCommsWhoami: () => fetchJSON<CommsWhoamiResponse>("/api/comms/whoami"),
+  getCommsNotifications: (kind?: CommsNotificationKind) =>
+    fetchJSON<CommsNotificationsResponse>(
+      `/api/comms/notifications${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`,
+    ),
+  answerCommsNotification: (id: string, answer: string) =>
+    fetchJSON<CommsAnswerResponse>(
+      `/api/comms/notifications/${encodeURIComponent(id)}/answer`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answer }),
+      },
+    ),
+  getCommsGoals: (status?: string) =>
+    fetchJSON<CommsGoalsResponse>(
+      `/api/comms/goals${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+    ),
+  getCommsChanges: () => fetchJSON<CommsChangesResponse>("/api/comms/changes"),
+  undoCommsChange: (id: string) =>
+    fetchJSON<CommsChangeActionResponse>(
+      `/api/comms/changes/${encodeURIComponent(id)}/undo`,
+      { method: "POST" },
+    ),
+  redoCommsChange: (id: string) =>
+    fetchJSON<CommsChangeActionResponse>(
+      `/api/comms/changes/${encodeURIComponent(id)}/redo`,
+      { method: "POST" },
+    ),
+  getCommsMemory: () => fetchJSON<CommsMemoryResponse>("/api/comms/memory"),
 };
+
+export type CommsNotificationKind = "approval" | "proactive_ask";
+
+export interface CommsPrincipal {
+  user_id: string;
+  display: string;
+  role: string;
+  channels: string[];
+  is_owner: boolean;
+}
+
+export interface CommsWhoamiResponse {
+  configured: boolean;
+  principal: CommsPrincipal | null;
+}
+
+export interface CommsNotification {
+  id: string;
+  kind: CommsNotificationKind;
+  owner_user_id: string;
+  visibility: string;
+  title: string;
+  body: string;
+  command: string;
+  reversible: boolean;
+  status: string;
+  answer: string | null;
+  answered_by: string | null;
+  answered_via: string | null;
+  delivered: boolean;
+  created_at: string | null;
+  answered_at: string | null;
+}
+
+export interface CommsNotificationsResponse {
+  configured: boolean;
+  principal?: string | null;
+  notifications: CommsNotification[];
+}
+
+export interface CommsAnswerResponse {
+  ok: boolean;
+  newly_answered: boolean;
+  notification: CommsNotification;
+}
+
+export interface CommsGoal {
+  id: string;
+  title: string;
+  description: string;
+  priority: string;
+  status: string;
+  visibility: string;
+  owner_user_id: string;
+}
+
+export interface CommsGoalsResponse {
+  configured: boolean;
+  principal?: string | null;
+  goals: CommsGoal[];
+}
+
+export interface CommsChange {
+  id: string;
+  actor_user_id: string | null;
+  mode: string;
+  target_kind: string;
+  reversible: boolean;
+  visibility: string;
+  undone: boolean;
+}
+
+export interface CommsChangesResponse {
+  configured: boolean;
+  principal?: string | null;
+  changes: CommsChange[];
+}
+
+export interface CommsChangeActionResponse {
+  ok: boolean;
+  change_ref: string;
+  target_kind: string;
+}
+
+export interface CommsMemory {
+  id: string;
+  kind: string;
+  topic: string | null;
+  content: string;
+  visibility: string;
+  created_at: string | null;
+}
+
+export interface CommsMemoryResponse {
+  configured: boolean;
+  principal?: string | null;
+  memories: CommsMemory[];
+}
 
 /** Identity payload returned by ``GET /api/auth/me`` (Phase 7).
  *

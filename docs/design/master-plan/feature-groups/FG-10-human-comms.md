@@ -54,17 +54,28 @@ authoring (C3). Consent/quiet-hours prefs in `app_*` per principal.
 Tests green + baseline green + `ruff`/`ty` + web lint/typecheck clean; Telegram + web parity for messaging/approvals/change-review; C6 enforced; cache-safe; `data-component` applied; **ECS system test green**.
 
 ## Progress checklist
-- [ ] Principal-aware messaging + reply routing (account_id)
-- [ ] Web app: chat, scoped goals/tasks/memory, approvals, change review
-- [ ] C6 quiet-hours/rate-limit/consent enforcement + dedupe across surfaces
-- [ ] tests (unit + negative + E2E) green
+- [x] Principal-aware messaging + reply routing (account_id) — inbound C1 seam
+      reused (`gateway/inbound.bind_channel_principal`); outbound C1-aware
+      egress primitive `human_comms.resolve_reply_target` (platform +
+      `account_id` + resolved principal), unit-tested.
+- [x] Web app: scoped goals/memory + approvals + change review (undo/redo) on
+      the existing dashboard chat surface. New `CommsPage` + `/api/comms/*`.
+      (Scoped *tasks* deferred — no merged multi-user task-store contract yet;
+      the C2 goal registry is the planning surface at this wave.)
+- [x] C6 quiet-hours/rate-limit/consent enforcement + dedupe across surfaces —
+      shared `NotificationStore` (one Postgres row per pending item); answering
+      from either surface settles it idempotently (`newly_answered`).
+- [x] tests (unit + negative-access + real-Postgres E2E) green
 - [ ] System test on the system-test ECS passed (see *System testing* section)
+      — **pending owner (Leo) coordination**; live Telegram delivery + gateway
+      egress wiring are exercised there (no ECS/prod access from this PR).
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
 | 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
+| 2026-07-11 | 3 | devin:f88fdad7 | Implemented Wave-2 human-comms parity: shared C6-gated `NotificationStore` (cross-surface dedupe), C1-aware `resolve_reply_target` egress, `/api/comms/*` + web `CommsPage` for scoped goals/memory/approvals/change-review, consuming merged C1–C6/C3 contracts. Unit + negative-access + real-Postgres E2E green; ruff/ty/web clean. | Deliver Telegram+web multi-user parity; ECS system-test left pending owner coordination |
 
 ## Cloud-agent prompt
 > **[Wave 2 — start after FG-01 + FG-12 + FG-03 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-10`). Deliver **human comms parity across Telegram + web app** for the multi-user world: resolve every human message to a `Principal` (contract C1) and route replies to the correct channel/account (FG-03 `account_id`); extend the `web/` app (`hermes_cli/web_server.py`) so users can chat, view **scope-filtered** (contract C2) goals/tasks/memory, approve/deny pending actions, and review + undo/redo changes (FG-12) and manage tools (FG-07). All approvals + proactive asks (4.1/6.1) ride the shared **quiet-hours/rate-limit/consent policy (contract C6, co-owned with FG-12)** and are delivered as **appended messages** (never system-prompt mutations); de-duplicate a pending item across Telegram + web (answering one clears the other). New web components carry `data-component="ComponentName"`. Follow `AGENTS.md` (cache-sacred, footprint ladder, config not env). Add unit + negative-access + E2E tests + web lint/typecheck; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.
