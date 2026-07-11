@@ -1,6 +1,6 @@
 # FG-04 — Goals with priority + measurability/progress
 
-**Wave:** 1 · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** 1 · **Owner agent:** devin:49726ab9 · **Status:** In review (code + tests green; ECS system-test pending owner coordination)
 
 ## Summary
 Extend the existing per-session goal loop into a **prioritised, multi-goal
@@ -63,18 +63,19 @@ Registry in `app_*` via C3. The per-session Ralph loop stays in SessionDB
 Tests green + baseline green + `ruff`/`ty` clean; registry sits above the Ralph loop without breaking it; metrics computed; proactive asks ride C6; **ECS system test green**.
 
 ## Progress checklist
-- [ ] Goal registry (priority/status/scope) above the Ralph loop
-- [ ] `GoalMetric` + computed achievement + progress history
-- [ ] Proactive measurement solicitation via C6 (cache-safe asks)
-- [ ] Priority scheduling
-- [ ] tests (baseline + unit + negative + E2E) green
-- [ ] System test on the system-test ECS passed (see *System testing* section)
+- [x] Goal registry (priority/status/scope) above the Ralph loop — `hermes_cli/goal_registry.py` (`GoalRegistryStore`, C2-scoped `goals`/`goal_metrics`/`goal_progress`/`goal_asks`, C3-routed via `get_store`); Ralph loop in `hermes_cli/goals.py` untouched.
+- [x] `GoalMetric` + computed achievement + progress history — first-class `GoalMetric` in `hermes_cli/goals.py` (`achieved`/`progress_fraction`, `at_least`/`at_most`), `verdict_for_metrics` so "done" is computed; `goal_progress` append-only history.
+- [x] Proactive measurement solicitation via C6 (cache-safe asks) — `hermes_cli/goal_monitor.py` (`ProactiveMeasurementMonitor` + `ProactiveAskPolicy`: consent/quiet-hours/rate-limit from `config.yaml`); asks delivered only via an injected append-message `ask_fn`, never a system-prompt mutation.
+- [x] Priority scheduling — `priority_rank`/`priority_weight` + `schedule_turn_budget`/`order_goals` (weighted budget split, ties broken by deadline/staleness).
+- [x] tests (baseline + unit + negative + E2E) green — baseline `test_goal_state_baseline.py` stays green; `tests/hermes_cli/test_goal_metric.py`, `test_goal_monitor.py`, and real-Postgres `test_goal_registry_e2e.py` (incl. negative-access at app layer **and** Postgres RLS). `ruff`/`ty` clean on new files.
+- [ ] System test on the system-test ECS passed (see *System testing* section) — **pending owner (Leo)/orchestrator coordination**; this session has no ECS/prod access and does not attempt it.
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
 | 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
+| 2026-07-11 | 3 | devin:49726ab9 | Implemented FG-04: goal registry (`goal_registry.py`), `GoalMetric` + computed verdict (`goals.py`), proactive monitor + C6 policy (`goal_monitor.py`), priority scheduling; added unit + negative-access + real-Postgres E2E tests. Checklist boxes ticked except ECS system-test. | Wave 1 build-out; per-PR gate green, ECS run deferred to owner coordination |
 
 ## Cloud-agent prompt
 > **[Wave 1 — start after Wave 0 merges]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-04`). Build a **prioritised, measurable multi-goal registry ABOVE** the existing per-session Ralph loop in `hermes_cli/goals.py` — reuse `GoalState`/`GoalContract`/judge, DO NOT replace or break them (`tests/plan_baseline/test_goal_state_baseline.py` must stay green). Add a Supabase `app_*` registry (`goals`, `goal_metrics`, `goal_progress`) with `priority`, visibility scoping (contract C2, owner sees all), and a first-class **`GoalMetric{name,target,current,unit,source_query,cadence}`** so achievement + incremental progress are **computed**. Add a **proactive measurement monitor** (4.1) that watches feedback and, when metrics are missing/stale, **asks the user via appended messages through the shared consent/quiet-hours/rate-limit policy (contract C6)** — never mutate the system prompt. Add priority scheduling for turn budget. Follow `AGENTS.md` (cache-sacred, footprint ladder). Add baseline + unit + negative-access + E2E tests (temp `HERMES_HOME` + throwaway Postgres); run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.
