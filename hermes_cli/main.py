@@ -12639,6 +12639,13 @@ def main():
     register_send_subparser(subparsers)
 
     # =========================================================================
+    # promote command — approval-gated dev-to-prod artifact promotion
+    # =========================================================================
+    from hermes_cli.promote import register_promote_subparser
+
+    register_promote_subparser(subparsers)
+
+    # =========================================================================
     # login command  (parser built in hermes_cli/subcommands/login.py)
     # =========================================================================
     build_login_parser(subparsers, cmd_login=cmd_login)

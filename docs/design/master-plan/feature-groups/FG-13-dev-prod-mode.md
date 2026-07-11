@@ -62,11 +62,11 @@ tiny and typed.
 New tests green + baseline green + `ruff`/`ty` clean; C3 documented with typed interface + docstrings; promotion CLI works E2E on a temp `HERMES_HOME` + throwaway Postgres schema; **ECS system test green**.
 
 ## Progress checklist
-- [ ] C3 datastore router interface + docs
-- [ ] Mode resolution + channel prod-only guard
-- [ ] dev SQLite parallel DB
-- [ ] Supabase app_dev/app_prod schemas + migration runner
-- [ ] `hermes promote` CLI + skill
+- [x] C3 datastore router interface + docs
+- [x] Mode resolution + channel prod-only guard
+- [x] dev SQLite parallel DB
+- [x] Supabase app_dev/app_prod schemas + migration runner
+- [x] `hermes promote` CLI + skill
 - [ ] tests (unit + guard + E2E) green
 - [ ] System test on the system-test ECS passed (see *System testing* section)
 
@@ -75,6 +75,7 @@ New tests green + baseline green + `ruff`/`ty` clean; C3 documented with typed i
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
 | 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
+| 2026-07-11 | 3 | devin:0520a5a7 | Implemented C3 routing, channel prod guard, mode-separated stores, and approval-gated promotion | Publish the Wave-0 datastore seam and dev-to-prod workflow; ECS system test remains owner-coordinated |
 
 ## Cloud-agent prompt
 > **[Wave 0 — start immediately]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-13`). Implement the **dev/prod mode + datastore router (contract C3)**: a single typed accessor `get_store(kind, mode)` for `sqlite-core` (prod `state.db` + disposable `state.dev.db`) and `supabase-app` (`app_prod`/`app_dev` schemas); mode defaults to `prod`; **channel-originated sessions are forced to prod (hard guard + negative test)**; add a `hermes promote` CLI+skill that moves definitions/config/schema dev→prod behind an approval (contract C6) emitting a change-event (contract C5). Follow `AGENTS.md`: no new `HERMES_*` env vars (config in `config.yaml`), footprint ladder, no core-tool growth. Add unit + E2E tests against a temp `HERMES_HOME` + throwaway Postgres schema; keep `tests/plan_baseline/` green; run `scripts/run_tests.sh`, `ruff`, `ty`. Update ONLY this FG doc's progress checklist + audit log. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.

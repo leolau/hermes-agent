@@ -93,6 +93,8 @@ logger = logging.getLogger(__name__)
 
 
 LAZY_DEPS: dict[str, tuple[str, ...]] = {
+    # C3 Supabase application datastore router and promotion pipeline.
+    "datastore.supabase": ("asyncpg==0.31.0",),
     # ─── Inference providers ───────────────────────────────────────────────
     # Native Anthropic SDK — needed when provider=anthropic (not via
     # OpenRouter / aggregators which use the openai SDK).
