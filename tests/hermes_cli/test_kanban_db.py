@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.access import Principal
 
 
 @pytest.fixture
@@ -51,6 +52,31 @@ def test_init_db_is_idempotent(kanban_home):
         tasks = kb.list_tasks(conn)
     assert len(tasks) == 1
     assert tasks[0].title == "persisted"
+
+
+def test_task_visibility_is_scoped_by_principal(kanban_home):
+    member_a = Principal(user_id="a", display="A", role="member")
+    member_b = Principal(user_id="b", display="B", role="member")
+    owner = Principal(user_id="owner", display="Owner", role="owner")
+    with kb.connect() as conn:
+        private_id = kb.create_task(
+            conn,
+            title="Private",
+            owner_user_id=member_a.user_id,
+            visibility="private",
+        )
+        shared_id = kb.create_task(
+            conn,
+            title="Shared",
+            owner_user_id=member_a.user_id,
+            visibility="shared",
+        )
+
+        assert kb.get_task(conn, private_id, principal=member_b) is None
+        assert kb.get_task(conn, private_id, principal=owner) is not None
+        assert [task.id for task in kb.list_tasks(conn, principal=member_b)] == [
+            shared_id
+        ]
 
 
 def test_init_creates_expected_tables(kanban_home):

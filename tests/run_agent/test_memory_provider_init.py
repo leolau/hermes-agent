@@ -83,12 +83,17 @@ def test_aiagent_forwards_user_id_alt_to_memory_provider():
             platform="feishu",
             user_id="open-id",
             user_id_alt="union-id",
+            internal_user_id="internal-alice",
+            session_task="weekly-report",
         )
 
     assert agent._memory_manager is not None
     assert provider.init_session_id == "sess-alt"
     assert provider.init_kwargs["user_id"] == "open-id"
     assert provider.init_kwargs["user_id_alt"] == "union-id"
+    assert provider.init_kwargs["principal_user_id"] == "internal-alice"
+    assert provider.init_kwargs["principal_role"] == "member"
+    assert provider.init_kwargs["task"] == "weekly-report"
     assert provider.init_kwargs["platform"] == "feishu"
     assert "warning_callback" not in provider.init_kwargs
     assert "status_callback" not in provider.init_kwargs

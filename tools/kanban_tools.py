@@ -34,6 +34,7 @@ import os
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
+from hermes_cli.access import Principal
 from hermes_cli.goals import judge_goal
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get, load_config
@@ -333,6 +334,23 @@ def _require_orchestrator_tool(tool_name: str) -> Optional[str]:
     return None
 
 
+def _principal_from_kwargs(kwargs: dict) -> Optional[Principal]:
+    principal = kwargs.get("principal")
+    if isinstance(principal, Principal):
+        return principal
+    user_id = str(kwargs.get("principal_user_id") or "").strip()
+    if not user_id:
+        return None
+    role = kwargs.get("principal_role")
+    if role not in ("owner", "admin", "member", "viewer"):
+        role = "member"
+    return Principal(
+        user_id=user_id,
+        display=str(kwargs.get("principal_display") or user_id),
+        role=role,
+    )
+
+
 def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
     """Compact task shape for board-listing tools."""
     parents = kb.parent_ids(conn, task.id)
@@ -347,6 +365,8 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
         "workspace_kind": task.workspace_kind,
         "workspace_path": task.workspace_path,
         "project_id": task.project_id,
+        "owner_user_id": task.owner_user_id,
+        "visibility": task.visibility,
         "created_by": task.created_by,
         "created_at": task.created_at,
         "started_at": task.started_at,
@@ -376,7 +396,9 @@ def _handle_show(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            task = kb.get_task(conn, tid)
+            task = kb.get_task(
+                conn, tid, principal=_principal_from_kwargs(kw)
+            )
             if task is None:
                 return tool_error(f"task {tid} not found")
             comments = kb.list_comments(conn, tid)
@@ -393,6 +415,8 @@ def _handle_show(args: dict, **kw) -> str:
                     "workspace_kind": t.workspace_kind,
                     "workspace_path": t.workspace_path,
                     "created_by": t.created_by, "created_at": t.created_at,
+                    "owner_user_id": t.owner_user_id,
+                    "visibility": t.visibility,
                     "started_at": t.started_at,
                     "completed_at": t.completed_at,
                     "result": t.result,
@@ -478,6 +502,7 @@ def _handle_list(args: dict, **kw) -> str:
                 tenant=tenant,
                 include_archived=include_archived,
                 limit=limit + 1,
+                principal=_principal_from_kwargs(kw),
             )
             truncated = len(rows) > limit
             tasks = rows[:limit]
@@ -892,6 +917,8 @@ def _handle_create(args: dict, **kw) -> str:
             f"parents must be a list of task ids, got {type(parents).__name__}"
         )
     board = args.get("board")
+    principal = _principal_from_kwargs(kw)
+    visibility = args.get("visibility")
     try:
         kb, conn = _connect(board=board)
         try:
@@ -933,6 +960,8 @@ def _handle_create(args: dict, **kw) -> str:
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
                 session_id=session_id,
+                owner_user_id=principal.user_id if principal is not None else None,
+                visibility=visibility,
             )
             new_task = kb.get_task(conn, new_tid)
             subscribed = _maybe_auto_subscribe(conn, new_tid)
@@ -1469,6 +1498,14 @@ KANBAN_CREATE_SCHEMA = {
                     "set, the task becomes a git worktree under the project's "
                     "primary repo with a deterministic branch (project slug + "
                     "task id), instead of a random branch."
+                ),
+            },
+            "visibility": {
+                "type": "string",
+                "enum": ["private", "shared"],
+                "description": (
+                    "C2 scope for the task. Private tasks bind to the "
+                    "authenticated principal; omit on legacy unscoped boards."
                 ),
             },
             "triage": {

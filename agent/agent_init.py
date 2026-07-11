@@ -222,6 +222,8 @@ def init_agent(
     chat_type: str = None,
     thread_id: str = None,
     gateway_session_key: str = None,
+    internal_user_id: Optional[str] = None,
+    session_task: Optional[str] = None,
     skip_context_files: bool = False,
     load_soul_identity: bool = False,
     skip_memory: bool = False,
@@ -307,6 +309,8 @@ def init_agent(
     agent._chat_type = chat_type
     agent._thread_id = thread_id
     agent._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
+    agent._internal_user_id = internal_user_id
+    agent._session_task = session_task
     # Pluggable print function — CLI replaces this with _cprint so that
     # raw ANSI status lines are routed through prompt_toolkit's renderer
     # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -1281,6 +1285,11 @@ def init_agent(
                         _init_kwargs["user_id_alt"] = agent._user_id_alt
                     if agent._user_name:
                         _init_kwargs["user_name"] = agent._user_name
+                    if agent._internal_user_id:
+                        _init_kwargs["principal_user_id"] = agent._internal_user_id
+                        _init_kwargs["principal_role"] = "member"
+                    if agent._session_task:
+                        _init_kwargs["task"] = agent._session_task
                     if agent._chat_id:
                         _init_kwargs["chat_id"] = agent._chat_id
                     if agent._chat_name:

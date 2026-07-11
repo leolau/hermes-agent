@@ -89,6 +89,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from hermes_cli.access import (
+    Principal,
+    normalize_visibility,
+    parse_private_owner,
+    private,
+)
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from toolsets import get_toolset_names
 
@@ -914,6 +920,8 @@ class Task:
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
+    owner_user_id: Optional[str] = None
+    visibility: str = "shared"
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -997,6 +1005,12 @@ class Task:
                 int(row["block_recurrences"])
                 if "block_recurrences" in keys and row["block_recurrences"] is not None
                 else 0
+            ),
+            owner_user_id=(
+                row["owner_user_id"] if "owner_user_id" in keys else None
+            ),
+            visibility=(
+                row["visibility"] if "visibility" in keys else "shared"
             ),
         )
 
@@ -1101,6 +1115,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     status               TEXT NOT NULL,
     priority             INTEGER DEFAULT 0,
     created_by           TEXT,
+    owner_user_id        TEXT,
+    visibility           TEXT NOT NULL DEFAULT 'shared',
     created_at           INTEGER NOT NULL,
     started_at           INTEGER,
     completed_at         INTEGER,
@@ -1863,6 +1879,17 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "tasks", "branch_name", "branch_name TEXT")
     if "project_id" not in cols:
         _add_column_if_missing(conn, "tasks", "project_id", "project_id TEXT")
+    if "owner_user_id" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "owner_user_id", "owner_user_id TEXT"
+        )
+    if "visibility" not in cols:
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "visibility",
+            "visibility TEXT NOT NULL DEFAULT 'shared'",
+        )
     if "idempotency_key" not in cols:
         _add_column_if_missing(
             conn, "tasks", "idempotency_key", "idempotency_key TEXT"
@@ -2383,6 +2410,30 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _resolve_task_scope(
+    owner_user_id: Optional[str],
+    visibility: Optional[str],
+) -> tuple[Optional[str], str]:
+    owner = str(owner_user_id or "").strip() or None
+    if visibility is None:
+        return owner, private(owner) if owner is not None else "shared"
+    if visibility == "private":
+        if owner is None:
+            raise ValueError("private kanban tasks require owner_user_id")
+        resolved = private(owner)
+    else:
+        resolved = normalize_visibility(str(visibility).strip())
+    private_owner = parse_private_owner(resolved)
+    if private_owner is not None:
+        if owner is None:
+            owner = private_owner
+        elif owner != private_owner:
+            raise ValueError(
+                "kanban owner_user_id must match private visibility"
+            )
+    return owner, resolved
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -2407,6 +2458,8 @@ def create_task(
     session_id: Optional[str] = None,
     board: Optional[str] = None,
     project_id: Optional[str] = None,
+    owner_user_id: Optional[str] = None,
+    visibility: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -2432,6 +2485,9 @@ def create_task(
     translation skill regardless of the profile's default config).
     """
     assignee = _canonical_assignee(assignee)
+    owner_user_id, visibility = _resolve_task_scope(
+        owner_user_id, visibility
+    )
     if not title or not title.strip():
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
@@ -2632,11 +2688,12 @@ def create_task(
                     """
                     INSERT INTO tasks (
                         id, title, body, assignee, status, priority,
-                        created_by, created_at, workspace_kind, workspace_path,
+                        created_by, owner_user_id, visibility, created_at,
+                        workspace_kind, workspace_path,
                         branch_name, project_id, tenant, idempotency_key,
                         max_runtime_seconds,
                         skills, max_retries, goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2646,6 +2703,8 @@ def create_task(
                         task_status,
                         priority,
                         created_by,
+                        owner_user_id,
+                        visibility,
                         now,
                         workspace_kind,
                         workspace_path,
@@ -2702,8 +2761,18 @@ def _find_missing_parents(conn: sqlite3.Connection, parents: Iterable[str]) -> l
     return [p for p in parents if p not in present]
 
 
-def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
-    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+def get_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    principal: Optional[Principal] = None,
+) -> Optional[Task]:
+    query = "SELECT * FROM tasks WHERE id = ?"
+    params: list[Any] = [task_id]
+    if principal is not None and not principal.is_owner:
+        query += " AND (visibility = 'shared' OR visibility = ?)"
+        params.append(principal.private_visibility)
+    row = conn.execute(query, params).fetchone()
     return Task.from_row(row) if row else None
 
 
@@ -2733,6 +2802,7 @@ def list_tasks(
     order_by: Optional[str] = None,
     workflow_template_id: Optional[str] = None,
     current_step_key: Optional[str] = None,
+    principal: Optional[Principal] = None,
 ) -> list[Task]:
     query = "SELECT * FROM tasks WHERE 1=1"
     params: list[Any] = []
@@ -2756,6 +2826,9 @@ def list_tasks(
     if current_step_key is not None:
         query += " AND current_step_key = ?"
         params.append(current_step_key)
+    if principal is not None and not principal.is_owner:
+        query += " AND (visibility = 'shared' OR visibility = ?)"
+        params.append(principal.private_visibility)
     if not include_archived and status != "archived":
         query += " AND status != 'archived'"
     if order_by is not None:

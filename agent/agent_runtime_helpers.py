@@ -2052,12 +2052,26 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
 
     if function_name == "todo":
         def _execute(next_args: dict) -> Any:
-            from tools.todo_tool import todo_tool as _todo_tool
+            from tools.todo_tool import (
+                todo_principal as _todo_principal,
+                todo_tool as _todo_tool,
+            )
+            principal = _todo_principal(agent._internal_user_id)
+            if principal is None:
+                return _finish_agent_tool(
+                    _todo_tool(
+                        todos=next_args.get("todos"),
+                        merge=next_args.get("merge", False),
+                        store=agent._todo_store,
+                    ),
+                    next_args,
+                )
             return _finish_agent_tool(
                 _todo_tool(
                     todos=next_args.get("todos"),
                     merge=next_args.get("merge", False),
                     store=agent._todo_store,
+                    principal=principal,
                 ),
                 next_args,
             )

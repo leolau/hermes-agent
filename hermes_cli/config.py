@@ -912,6 +912,12 @@ DEFAULT_CONFIG = {
             "prod": {"supabase_app": {"dsn": ""}},
         },
     },
+    "tasks": {
+        "discovery": {
+            "threshold": 3,
+            "proposal_cooldown_seconds": 3600,
+        },
+    },
     # Global active chat session cap across CLI, TUI/dashboard, and messaging.
     # None/0 = unbounded.
     "max_concurrent_sessions": None,
