@@ -17,6 +17,14 @@ Design:
 import json
 from typing import Dict, Any, List, Optional
 
+from hermes_cli.access import (
+    Principal,
+    can_read_row,
+    normalize_visibility,
+    parse_private_owner,
+    private,
+)
+
 
 # Valid status values for todo items
 VALID_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
@@ -46,12 +54,18 @@ class TodoStore:
       - id: unique string identifier (agent-chosen)
       - content: task description
       - status: pending | in_progress | completed | cancelled
+      - owner_user_id / visibility: optional C2 scope metadata
     """
 
     def __init__(self):
         self._items: List[Dict[str, str]] = []
 
-    def write(self, todos: List[Dict[str, Any]], merge: bool = False) -> List[Dict[str, str]]:
+    def write(
+        self,
+        todos: List[Dict[str, Any]],
+        merge: bool = False,
+        principal: Optional[Principal] = None,
+    ) -> List[Dict[str, str]]:
         """
         Write todos. Returns the full current list after writing.
 
@@ -62,7 +76,10 @@ class TodoStore:
         """
         if not merge:
             # Replace mode: new list entirely
-            self._items = [self._validate(t) for t in self._dedupe_by_id(todos)]
+            self._items = [
+                self._validate(t, principal=principal)
+                for t in self._dedupe_by_id(todos)
+            ]
         else:
             # Merge mode: update existing items by id, append new ones
             existing = {item["id"]: item for item in self._items}
@@ -72,6 +89,14 @@ class TodoStore:
                     continue  # Can't merge without an id
 
                 if item_id in existing:
+                    if (
+                        principal is not None
+                        and "visibility" in existing[item_id]
+                        and not can_read_row(principal, existing[item_id])
+                    ):
+                        raise PermissionError(
+                            "cannot update another user's private todo"
+                        )
                     # Update only the fields the LLM actually provided
                     if "content" in t and t["content"]:
                         existing[item_id]["content"] = self._cap_content(str(t["content"]).strip())
@@ -79,9 +104,12 @@ class TodoStore:
                         status = str(t["status"]).strip().lower()
                         if status in VALID_STATUSES:
                             existing[item_id]["status"] = status
+                    if "owner_user_id" in t or "visibility" in t:
+                        scoped = self._scope_metadata(t, principal=principal)
+                        existing[item_id].update(scoped)
                 else:
                     # New item -- validate fully and append to end
-                    validated = self._validate(t)
+                    validated = self._validate(t, principal=principal)
                     existing[validated["id"]] = validated
                     self._items.append(validated)
             # Rebuild _items preserving order for existing items
@@ -98,24 +126,34 @@ class TodoStore:
         # (list order is priority).
         if len(self._items) > MAX_TODO_ITEMS:
             self._items = self._items[:MAX_TODO_ITEMS]
-        return self.read()
+        return self.read(principal)
 
-    def read(self) -> List[Dict[str, str]]:
-        """Return a copy of the current list."""
-        return [item.copy() for item in self._items]
+    def read(self, principal: Optional[Principal] = None) -> List[Dict[str, str]]:
+        """Return a copy of the current list, optionally filtered by C2 scope."""
+        items = self._items
+        if principal is not None:
+            items = [
+                item
+                for item in items
+                if "visibility" not in item or can_read_row(principal, item)
+            ]
+        return [item.copy() for item in items]
 
     def has_items(self) -> bool:
         """Check if there are any items in the list."""
         return bool(self._items)
 
-    def format_for_injection(self) -> Optional[str]:
+    def format_for_injection(
+        self, principal: Optional[Principal] = None
+    ) -> Optional[str]:
         """
         Render the todo list for post-compression injection.
 
         Returns a human-readable string to append to the compressed
         message history, or None if the list is empty.
         """
-        if not self._items:
+        items = self.read(principal)
+        if not items:
             return None
 
         # Status markers for compact display
@@ -129,7 +167,7 @@ class TodoStore:
         # Only inject pending/in_progress items — completed/cancelled ones
         # cause the model to re-do finished work after compression.
         active_items = [
-            item for item in self._items
+            item for item in items
             if item["status"] in {"pending", "in_progress"}
         ]
         if not active_items:
@@ -156,12 +194,49 @@ class TodoStore:
         return content
 
     @staticmethod
-    def _validate(item: Dict[str, Any]) -> Dict[str, str]:
+    def _scope_metadata(
+        item: Dict[str, Any],
+        *,
+        principal: Optional[Principal] = None,
+    ) -> Dict[str, str]:
+        owner = str(item.get("owner_user_id", "")).strip()
+        raw_visibility = item.get("visibility")
+        if not owner and raw_visibility is None and principal is None:
+            return {}
+        if not owner and principal is not None:
+            owner = principal.user_id
+        if raw_visibility is None:
+            visibility = private(owner)
+        elif str(raw_visibility).strip() == "private":
+            if not owner:
+                raise ValueError("private todo items require owner_user_id")
+            visibility = private(owner)
+        else:
+            visibility = normalize_visibility(str(raw_visibility).strip())
+        private_owner = parse_private_owner(visibility)
+        if private_owner is not None:
+            if not owner:
+                owner = private_owner
+            if owner != private_owner:
+                raise ValueError("todo owner_user_id must match private visibility")
+            if principal is not None and not principal.is_owner:
+                if principal.user_id != private_owner:
+                    raise PermissionError("cannot create a todo private to another user")
+        if not owner:
+            raise ValueError("scoped todo items require owner_user_id")
+        return {"owner_user_id": owner, "visibility": visibility}
+
+    @staticmethod
+    def _validate(
+        item: Dict[str, Any],
+        *,
+        principal: Optional[Principal] = None,
+    ) -> Dict[str, str]:
         """
         Validate and normalize a todo item.
 
         Ensures required fields exist and status is valid.
-        Returns a clean dict with only {id, content, status}.
+        Returns a clean dict with core fields plus optional C2 metadata.
         """
         if not isinstance(item, dict):
             return {"id": "?", "content": "(invalid item)", "status": "pending"}
@@ -180,7 +255,9 @@ class TodoStore:
         if status not in VALID_STATUSES:
             status = "pending"
 
-        return {"id": item_id, "content": content, "status": status}
+        clean = {"id": item_id, "content": content, "status": status}
+        clean.update(TodoStore._scope_metadata(item, principal=principal))
+        return clean
 
     @staticmethod
     def _dedupe_by_id(todos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -196,10 +273,18 @@ class TodoStore:
         return [todos[i] for i in sorted(last_index.values())]
 
 
+def todo_principal(user_id: Optional[str]) -> Principal:
+    clean = str(user_id or "").strip()
+    if clean:
+        return Principal(user_id=clean, display=clean, role="member")
+    return Principal(user_id="owner", display="owner", role="owner")
+
+
 def todo_tool(
     todos: Optional[List[Dict[str, Any]]] = None,
     merge: bool = False,
     store: Optional[TodoStore] = None,
+    principal: Optional[Principal] = None,
 ) -> str:
     """
     Single entry point for the todo tool. Reads or writes depending on params.
@@ -226,9 +311,9 @@ def todo_tool(
             return tool_error(
                 f"todos must be a list, got {type(todos).__name__}"
             )
-        items = store.write(todos, merge)
+        items = store.write(todos, merge, principal)
     else:
-        items = store.read()
+        items = store.read(principal)
 
     # Build summary counts
     pending = sum(1 for i in items if i["status"] == "pending")
@@ -297,6 +382,14 @@ TODO_SCHEMA = {
                             "type": "string",
                             "enum": ["pending", "in_progress", "completed", "cancelled"],
                             "description": "Current status"
+                        },
+                        "visibility": {
+                            "type": "string",
+                            "enum": ["private", "shared"],
+                            "description": (
+                                "Optional C2 scope. 'private' binds the item to "
+                                "the current principal; 'shared' is org-visible."
+                            )
                         }
                     },
                     "required": ["id", "content", "status"]

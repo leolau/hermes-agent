@@ -2,6 +2,7 @@
 
 import json
 
+from hermes_cli.access import Principal
 from tools.todo_tool import TodoStore, todo_tool
 
 
@@ -117,6 +118,29 @@ class TestTodoToolFunction:
     def test_no_store_returns_error(self):
         result = json.loads(todo_tool())
         assert "error" in result
+
+
+def test_scoped_todos_hide_other_members_private_items_from_injection():
+    member_a = Principal(user_id="a", display="A", role="member")
+    member_b = Principal(user_id="b", display="B", role="member")
+    owner = Principal(user_id="owner", display="Owner", role="owner")
+    store = TodoStore()
+    store.write(
+        [
+            {"id": "private", "content": "A only", "status": "pending"},
+            {
+                "id": "shared",
+                "content": "Everyone",
+                "status": "pending",
+                "visibility": "shared",
+            },
+        ],
+        principal=member_a,
+    )
+
+    assert [item["id"] for item in store.read(member_b)] == ["shared"]
+    assert {item["id"] for item in store.read(owner)} == {"private", "shared"}
+    assert "A only" not in store.format_for_injection(member_b)
 
 
 class TestTodoStoreBounds:

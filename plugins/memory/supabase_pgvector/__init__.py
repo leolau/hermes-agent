@@ -37,11 +37,37 @@ from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
 from hermes_cli.access import Principal
+from hermes_cli.changes import ChangeLog, initialize_changes
+from hermes_cli.config import load_config
+from hermes_cli.datastore import SupabaseAppStore, get_store
+from hermes_cli.task_registry import (
+    LiveMemoryIntentSignals,
+    TaskDiscoveryEngine,
+    TaskRegistryStore,
+)
 
 from .embedding import DEFAULT_DIM
 from .store import PgvectorMemoryStore
 
 logger = logging.getLogger(__name__)
+
+
+async def _initialize_stores(
+    app_store: SupabaseAppStore,
+    memory_store: PgvectorMemoryStore,
+) -> tuple[TaskRegistryStore, Optional[ChangeLog]]:
+    change_log: Optional[ChangeLog] = None
+    if app_store.mode == "prod":
+        connection = await app_store.connect()
+        try:
+            await initialize_changes(connection)
+        finally:
+            await connection.close()
+        change_log = ChangeLog(app_store)
+    registry = TaskRegistryStore(app_store)
+    await memory_store.initialize()
+    await registry.initialize()
+    return registry, change_log
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +154,9 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
         self._session_id = ""
         self._init_error = ""
         self._dim = DEFAULT_DIM
+        self._task_discovery: Optional[TaskDiscoveryEngine] = None
+        self._task_proposal = ""
+        self._task_session = False
 
     @property
     def name(self) -> str:
@@ -137,8 +166,6 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
 
     def _resolve_dsn(self, config: Optional[dict] = None) -> str:
         try:
-            from hermes_cli.datastore import get_store
-
             store = get_store("supabase-app", config=config)
             return store.dsn
         except Exception:
@@ -198,6 +225,9 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         self._session_id = session_id or ""
         self._principal = self._resolve_principal(kwargs)
+        self._task_session = bool(kwargs.get("task")) or ":task:" in str(
+            kwargs.get("gateway_session_key") or ""
+        )
         try:
             from tools.lazy_deps import ensure
 
@@ -205,16 +235,75 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
         except Exception:
             pass
         try:
-            from hermes_cli.datastore import get_store
-
             store = get_store("supabase-app")
             self._store = PgvectorMemoryStore(store)
             self._dim = self._store.dim
-            self._run_async(self._store.initialize())
+            registry, change_log = self._run_async(
+                _initialize_stores(store, self._store)
+            )
+            self._task_discovery = TaskDiscoveryEngine.from_config(
+                registry,
+                LiveMemoryIntentSignals(self._store),
+                config=load_config(),
+                proposal_sink=self._capture_task_proposal,
+                change_recorder=change_log,
+            )
         except Exception as exc:  # pragma: no cover - env/config dependent
             self._init_error = str(exc)
             self._store = None
             logger.warning("supabase_pgvector initialize failed: %s", exc)
+
+    def _capture_task_proposal(self, proposal: str) -> None:
+        self._task_proposal = proposal
+
+    def on_turn_start(
+        self,
+        turn_number: int,
+        message: str,
+        **kwargs,
+    ) -> None:
+        del turn_number, kwargs
+        if (
+            self._task_discovery is None
+            or self._principal is None
+            or not message.strip()
+        ):
+            return
+        self._task_proposal = ""
+        try:
+            outcome = self._run_async(
+                self._task_discovery.observe_prompt(
+                    self._principal,
+                    message,
+                    source_session=self._session_id or None,
+                    origin=(
+                        "discovered_task"
+                        if self._task_session
+                        else "user"
+                    ),
+                )
+            )
+            if self._task_proposal:
+                status = (
+                    "accepted and tracked"
+                    if outcome.action == "task_accepted"
+                    else "not accepted"
+                )
+                self._task_proposal += f"\nApproval result: {status}."
+        except Exception:
+            logger.debug("task discovery observation failed", exc_info=True)
+
+    def prefetch(self, query: str, **kwargs) -> str:
+        del query, kwargs
+        proposal = self._task_proposal
+        self._task_proposal = ""
+        if not proposal:
+            return ""
+        return (
+            "<task-discovery>\n"
+            f"{proposal}\n"
+            "</task-discovery>"
+        )
 
     def system_prompt_block(self) -> str:
         """STATIC provider info only — never dynamic recall (cache-safe).

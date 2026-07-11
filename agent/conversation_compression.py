@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from agent.model_metadata import estimate_request_tokens_rough
+from tools.todo_tool import todo_principal
 
 logger = logging.getLogger(__name__)
 
@@ -644,7 +645,9 @@ def compress_context(
                         "check auxiliary.compression.model in config.yaml."
                     )
 
-        todo_snapshot = agent._todo_store.format_for_injection()
+        todo_snapshot = agent._todo_store.format_for_injection(
+            todo_principal(agent._internal_user_id)
+        )
         if todo_snapshot:
             compressed.append({"role": "user", "content": todo_snapshot})
 

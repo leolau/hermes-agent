@@ -1160,11 +1160,15 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             )
         elif function_name == "todo":
             def _execute(next_args: dict) -> Any:
-                from tools.todo_tool import todo_tool as _todo_tool
+                from tools.todo_tool import (
+                    todo_principal as _todo_principal,
+                    todo_tool as _todo_tool,
+                )
                 return _todo_tool(
                     todos=next_args.get("todos"),
                     merge=next_args.get("merge", False),
                     store=agent._todo_store,
+                    principal=_todo_principal(agent._internal_user_id),
                 )
             function_result, function_args = _run_agent_tool_execution_middleware(
                 agent,
@@ -1401,6 +1405,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     function_name, function_args, effective_task_id,
                     tool_call_id=tool_call.id,
                     session_id=agent.session_id or "",
+                    principal_user_id=agent._internal_user_id,
                     turn_id=getattr(agent, "_current_turn_id", "") or "",
                     api_request_id=getattr(agent, "_current_api_request_id", "") or "",
                     enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
@@ -1443,6 +1448,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     function_name, function_args, effective_task_id,
                     tool_call_id=tool_call.id,
                     session_id=agent.session_id or "",
+                    principal_user_id=agent._internal_user_id,
                     turn_id=getattr(agent, "_current_turn_id", "") or "",
                     api_request_id=getattr(agent, "_current_api_request_id", "") or "",
                     enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,

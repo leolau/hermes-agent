@@ -17077,6 +17077,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
                     gateway_session_key=session_key,
+                    internal_user_id=source.internal_user_id,
+                    session_task=source.task,
                     session_db=getattr(self._session_db, "_db", self._session_db),
                     fallback_model=self._fallback_model,
                 )
