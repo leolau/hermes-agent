@@ -42,8 +42,8 @@ Management operates per mode (C3). Channel-sourced management is prod-only.
 - E2E across surfaces: create+link a goal via web, advance a linked task via Telegram, query it via MCP, and confirm a channel-sourced update — all consistent, all scope-correct, all cache-safe.
 - Baseline green.
 
-## System testing (existing ECS)
-**Required step after this FG's development completes** (part of its Definition of Done), on top of the per-PR unit/E2E + baseline gate: deploy this FG to the existing ai-prentice ECS (`i-j6camnt3ocwlmzajthil`, 2/4, cn-hongkong) — the dedicated **system-test host** — and exercise it end-to-end on the real stack against a **staging** Supabase schema (`app_staging`) + staging SQLite core (**never prod**). See README §7.1. As the final integration FG, this also owns the **cross-surface system-test pass** over the fully assembled stack. Acceptance checklist:
+## System testing (system-test box)
+**Required step after this FG's development completes** (part of its Definition of Done), on top of the per-PR unit/E2E + baseline gate: deploy this FG to the new ai-prentice ECS (`hermes-systest`, `i-j6c81aisv2dd8mg17yle`, 4/16, cn-hongkong-b, EIP `47.83.199.25`) — the dedicated **system-test host** — and exercise it end-to-end on the real stack against a **staging** Supabase schema (`app_staging`) + staging SQLite core (**never prod**). See README §7.1. As the final integration FG, this also owns the **cross-surface system-test pass** over the fully assembled stack. Acceptance checklist:
 - End-to-end across **all four surfaces** (a channel, Telegram, the web app, MCP): create + link a goal, advance a linked task, query via MCP, and push a channel-sourced update — confirm all four stay consistent, scope-correct (C2), and cache-safe.
 - Re-run the earlier FGs' ECS checklists on the integrated stack to confirm no cross-FG regression.
 - **Gate:** this FG is not complete/promotable until this ECS checklist passes (on top of the per-PR gate).
@@ -61,13 +61,13 @@ Tests green (incl. cross-surface E2E + negative access) + baseline green + `ruff
 - [ ] Cache-safe context assembly (appended tool results)
 - [ ] Cross-resource consistency propagation
 - [ ] tests (unit + negative + cross-surface E2E) green
-- [ ] System test on existing ECS passed (see *System testing* section)
+- [ ] System test on the system-test ECS passed (see *System testing* section)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
-| 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (existing ECS) section as a per-FG DoD step | Leo: existing ECS = system-test host, run after each FG's development |
+| 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
 
 ## Cloud-agent prompt
-> **[Wave 3 — start after FG-04, 05, 06, 07, 10, 11 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-09`). Build the **integration layer** that unifies **goals + memory + tasks + tools** and exposes goal management uniformly across **incoming channels, Telegram, the web app, and MCP** via ONE service layer with four front-ends. Add scoped `goal_links(goal_id, resource_kind∈{memory,task,tool}, resource_ref)` (contract C2; owner sees all). Assemble goal context **cache-safely** — pull relevant memory/tasks/tools via tool calls whose results are **appended** (never mutate the system prompt). Propagate cross-resource updates (task done / metric hit → goal; tool retired → dependent goals flagged); channel-sourced management is prod-only (contract C3). Follow `AGENTS.md` (cache-sacred, footprint ladder, extend not duplicate). Add unit + negative-access + **cross-surface E2E** tests; run `scripts/run_tests.sh`, `ruff`, `ty` + web lint/typecheck. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (existing ECS)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.
+> **[Wave 3 — start after FG-04, 05, 06, 07, 10, 11 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-09`). Build the **integration layer** that unifies **goals + memory + tasks + tools** and exposes goal management uniformly across **incoming channels, Telegram, the web app, and MCP** via ONE service layer with four front-ends. Add scoped `goal_links(goal_id, resource_kind∈{memory,task,tool}, resource_ref)` (contract C2; owner sees all). Assemble goal context **cache-safely** — pull relevant memory/tasks/tools via tool calls whose results are **appended** (never mutate the system prompt). Propagate cross-resource updates (task done / metric hit → goal; tool retired → dependent goals flagged); channel-sourced management is prod-only (contract C3). Follow `AGENTS.md` (cache-sacred, footprint ladder, extend not duplicate). Add unit + negative-access + **cross-surface E2E** tests; run `scripts/run_tests.sh`, `ruff`, `ty` + web lint/typecheck. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.

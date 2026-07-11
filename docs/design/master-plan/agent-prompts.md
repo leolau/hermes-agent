@@ -17,7 +17,7 @@ prompt for each FG lives at the bottom of that FG's doc under **"Cloud-agent
 prompt"** — the entries below are copies for convenience.
 
 **System testing:** an FG is not done until, after its code is developed, its
-**"System testing (existing ECS)"** checklist (in its FG doc) passes on the
+**"System testing (system-test box)"** checklist (in its FG doc) passes on the
 existing ai-prentice ECS (the dedicated system-test host — never prod). See
 [`README.md` §7.1](./README.md). Coordinate that deploy/run with Leo.
 

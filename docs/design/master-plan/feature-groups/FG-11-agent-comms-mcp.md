@@ -42,8 +42,8 @@ MCP endpoints carry `mode`; dev endpoints only reachable in dev sessions (C3).
 - E2E: register an in-house MCP endpoint, call a tool through the client, assert scope + no live-conversation toolset mutation.
 - Baseline green.
 
-## System testing (existing ECS)
-**Required step after this FG's development completes** (part of its Definition of Done), on top of the per-PR unit/E2E + baseline gate: deploy this FG to the existing ai-prentice ECS (`i-j6camnt3ocwlmzajthil`, 2/4, cn-hongkong) — the dedicated **system-test host** — and exercise it end-to-end on the real stack against a **staging** Supabase schema (`app_staging`) + staging SQLite core (**never prod**). See README §7.1. Acceptance checklist:
+## System testing (system-test box)
+**Required step after this FG's development completes** (part of its Definition of Done), on top of the per-PR unit/E2E + baseline gate: deploy this FG to the new ai-prentice ECS (`hermes-systest`, `i-j6c81aisv2dd8mg17yle`, 4/16, cn-hongkong-b, EIP `47.83.199.25`) — the dedicated **system-test host** — and exercise it end-to-end on the real stack against a **staging** Supabase schema (`app_staging`) + staging SQLite core (**never prod**). See README §7.1. Acceptance checklist:
 - A **peer agent** connects to the deployed Hermes over real MCP; confirm principal-aware **scoped reads** (C2) + consent-gated writes (C6); unauthenticated ⇒ `viewer`.
 - Register + call one in-house and one remote MCP endpoint from the box; confirm **no live-conversation toolset splicing** (new tools serve future sessions only).
 - **Gate:** this FG is not complete/promotable until this ECS checklist passes (on top of the per-PR gate).
@@ -61,13 +61,13 @@ Tests green + baseline green + `ruff`/`ty` clean; `mcp_serve.py` extended (not f
 - [ ] Principal resolution for MCP connections
 - [ ] endpoint registry (`mode`-aware)
 - [ ] tests (unit + negative + E2E) green
-- [ ] System test on existing ECS passed (see *System testing* section)
+- [ ] System test on the system-test ECS passed (see *System testing* section)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
-| 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (existing ECS) section as a per-FG DoD step | Leo: existing ECS = system-test host, run after each FG's development |
+| 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
 
 ## Cloud-agent prompt
-> **[Wave 1 — start after FG-01 merges]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-11`). Standardise **agent comms on MCP** both directions. Server side: EXTEND `mcp_serve.py` (do not fork) with **principal-aware, scoped** tools so peer agents can query goals/tasks/memory/tools with reads filtered by contract C2 and mutating writes gated by contract C6; keep the surface stable + documented (it's the interface FG-09 consumes). Client side: a uniform registration path (reuse `tools/mcp_tool.py` + `hermes mcp` + the `optional-mcps/` catalog) for in-house (FG-07) and remote (FG-08) MCP servers, with a `mode`-aware `mcp_endpoints` registry. Map every MCP connection to a `Principal` (contract C1; unauthenticated ⇒ `viewer`). NEVER splice a new MCP tool into a live conversation's toolset — new tools serve future sessions only (cache-safety). Follow `AGENTS.md` (MCP is the preferred non-core rung; no core-tool growth). Add unit + negative-scope + E2E tests; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (existing ECS)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.
+> **[Wave 1 — start after FG-01 merges]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-11`). Standardise **agent comms on MCP** both directions. Server side: EXTEND `mcp_serve.py` (do not fork) with **principal-aware, scoped** tools so peer agents can query goals/tasks/memory/tools with reads filtered by contract C2 and mutating writes gated by contract C6; keep the surface stable + documented (it's the interface FG-09 consumes). Client side: a uniform registration path (reuse `tools/mcp_tool.py` + `hermes mcp` + the `optional-mcps/` catalog) for in-house (FG-07) and remote (FG-08) MCP servers, with a `mode`-aware `mcp_endpoints` registry. Map every MCP connection to a `Principal` (contract C1; unauthenticated ⇒ `viewer`). NEVER splice a new MCP tool into a live conversation's toolset — new tools serve future sessions only (cache-safety). Follow `AGENTS.md` (MCP is the preferred non-core rung; no core-tool growth). Add unit + negative-scope + E2E tests; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.
