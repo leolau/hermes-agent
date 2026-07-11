@@ -99,6 +99,61 @@ def build_mcp_parser(subparsers, *, cmd_mcp: Callable) -> None:
         help="Re-authenticate every OAuth server in config, one at a time",
     )
 
+    # ── FG-11 agent-comms endpoint registry ───────────────────────────────
+    mcp_ep_p = mcp_sub.add_parser(
+        "endpoints",
+        help="Manage the mode-aware, scoped MCP endpoint registry (FG-11)",
+    )
+    mcp_ep_sub = mcp_ep_p.add_subparsers(dest="endpoints_action")
+    mcp_ep_list = mcp_ep_sub.add_parser(
+        "list", aliases=["ls"], help="List endpoints visible to the operator"
+    )
+    mcp_ep_reg = mcp_ep_sub.add_parser(
+        "register", help="Register an in-house or remote MCP endpoint"
+    )
+    mcp_ep_reg.add_argument("name", help="Endpoint name (unique per mode)")
+    mcp_ep_reg.add_argument(
+        "--kind",
+        choices=["in_house", "remote"],
+        default="remote",
+        help="Endpoint kind (default: remote)",
+    )
+    mcp_ep_reg.add_argument("--url", help="HTTP/SSE endpoint URL")
+    mcp_ep_reg.add_argument(
+        "--command", dest="mcp_command", help="Stdio command (e.g. npx)"
+    )
+    mcp_ep_reg.add_argument(
+        "--args",
+        nargs=argparse.REMAINDER,
+        default=[],
+        help="Arguments for the stdio command; must be the last option",
+    )
+    mcp_ep_reg.add_argument(
+        "--env",
+        nargs="*",
+        default=[],
+        help="Environment variables for stdio servers (KEY=VALUE)",
+    )
+    mcp_ep_reg.add_argument("--auth", help="Auth hint for http transports")
+    mcp_ep_reg.add_argument(
+        "--shared",
+        action="store_true",
+        help="Register as shared (default: private to the operator)",
+    )
+    for _ep_parser in (mcp_ep_list, mcp_ep_reg):
+        _ep_parser.add_argument(
+            "--mode",
+            choices=["dev", "prod"],
+            default=None,
+            help="Datastore mode (default: config datastore.mode)",
+        )
+        _ep_parser.add_argument(
+            "--as",
+            dest="as_user",
+            default=None,
+            help="Operate as this principal (default: the enrolled owner)",
+        )
+
     # ── Catalog (Nous-approved MCPs shipped with the repo) ─────────────────
     mcp_sub.add_parser(
         "picker",

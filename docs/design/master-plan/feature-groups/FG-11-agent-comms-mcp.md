@@ -1,6 +1,6 @@
 # FG-11 — Agent communications: MCP
 
-**Wave:** 1 · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** 1 · **Owner agent:** devin:1e1e0865 · **Status:** In review (PR open; ECS system-test pending owner coordination)
 
 ## Summary
 Standardise **agent↔agent / agent↔tool** communication on **MCP**, in both
@@ -56,18 +56,19 @@ MCP endpoints carry `mode`; dev endpoints only reachable in dev sessions (C3).
 Tests green + baseline green + `ruff`/`ty` clean; `mcp_serve.py` extended (not forked); MCP surface documented as a contract; cache-safety preserved (no live toolset splicing); **ECS system test green**.
 
 ## Progress checklist
-- [ ] Extend `mcp_serve.py` with scoped, principal-aware tools
-- [ ] Uniform in-house/remote MCP registration via catalog
-- [ ] Principal resolution for MCP connections
-- [ ] endpoint registry (`mode`-aware)
-- [ ] tests (unit + negative + E2E) green
-- [ ] System test on the system-test ECS passed (see *System testing* section)
+- [x] Extend `mcp_serve.py` with scoped, principal-aware tools (`whoami`, `memory_search` C2-scoped read, `memory_add` C6-gated write)
+- [x] Uniform in-house/remote MCP registration via catalog (`hermes mcp endpoints register|list` → registry → `mcp_servers` config for the existing `tools/mcp_tool.py` client)
+- [x] Principal resolution for MCP connections (`_resolve_mcp_principal` via C1 `resolve_by_channel`; unauthenticated ⇒ anonymous `viewer`)
+- [x] endpoint registry (`mode`-aware) — `hermes_cli/mcp_endpoints.py`, C3-routed (per-mode schema) + C2-scoped rows
+- [x] tests (unit + negative + E2E) green
+- [ ] System test on the system-test ECS passed (see *System testing* section) — **pending owner (Leo)/orchestrator coordination; not run in this PR**
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
 | 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
+| 2026-07-11 | 3 | devin:1e1e0865 | Implemented FG-11: extended `mcp_serve.py` with principal-aware scoped tools (C2 reads / C6-gated writes); added the `mode`-aware, C2-scoped `mcp_endpoints` registry (`hermes_cli/mcp_endpoints.py`) + uniform `hermes mcp endpoints` registration reusing the existing MCP client config shape; unit + negative-scope + real-path Postgres E2E green, `ruff`/`ty` clean on changed files, baseline green | Deliver Wave-1 agent-comms MCP reusing merged C1–C6 contracts; ECS system-test deferred to owner coordination per task |
 
 ## Cloud-agent prompt
 > **[Wave 1 — start after FG-01 merges]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-11`). Standardise **agent comms on MCP** both directions. Server side: EXTEND `mcp_serve.py` (do not fork) with **principal-aware, scoped** tools so peer agents can query goals/tasks/memory/tools with reads filtered by contract C2 and mutating writes gated by contract C6; keep the surface stable + documented (it's the interface FG-09 consumes). Client side: a uniform registration path (reuse `tools/mcp_tool.py` + `hermes mcp` + the `optional-mcps/` catalog) for in-house (FG-07) and remote (FG-08) MCP servers, with a `mode`-aware `mcp_endpoints` registry. Map every MCP connection to a `Principal` (contract C1; unauthenticated ⇒ `viewer`). NEVER splice a new MCP tool into a live conversation's toolset — new tools serve future sessions only (cache-safety). Follow `AGENTS.md` (MCP is the preferred non-core rung; no core-tool growth). Add unit + negative-scope + E2E tests; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.

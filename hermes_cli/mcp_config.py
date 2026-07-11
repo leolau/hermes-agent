@@ -938,6 +938,10 @@ def mcp_command(args):
         if rc:
             _sys.exit(rc)
         return
+    if action == "endpoints":
+        from hermes_cli.mcp_endpoints_cmd import cmd_endpoints
+        cmd_endpoints(args)
+        return
 
     handlers = {
         "add": cmd_mcp_add,
