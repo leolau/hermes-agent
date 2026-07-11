@@ -385,6 +385,31 @@ class ToolRegistry:
             if own:
                 await conn.close()
 
+    async def get_for_principal(
+        self,
+        principal: Principal,
+        name: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> Optional[Tool]:
+        """Return a named tool only when ``principal`` may read it (C2)."""
+        predicate = scope_filter(principal, start_index=2)
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            row = await conn.fetchrow(
+                f"""
+                SELECT {_COLUMNS} FROM {TOOLS_TABLE}
+                WHERE name = $1 AND {predicate.sql}
+                """,
+                name,
+                *predicate.params,
+            )
+            return _row_to_tool(row) if row is not None else None
+        finally:
+            if own:
+                await conn.close()
+
     async def list_for_principal(
         self,
         principal: Principal,

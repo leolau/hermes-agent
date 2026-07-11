@@ -230,6 +230,33 @@ class PgvectorMemoryStore:
             if own:
                 await conn.close()
 
+    async def get(
+        self,
+        principal: Principal,
+        memory_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> Optional[MemoryRecord]:
+        """Return one memory when ``principal`` may read it (contract C2)."""
+        predicate = scope_filter(principal, start_index=2)
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            row = await conn.fetchrow(
+                f"""
+                SELECT id, owner_user_id, visibility, kind, text, topic,
+                       source_session, created_at, NULL::float AS score
+                FROM {MEMORY_TABLE}
+                WHERE id = $1 AND {predicate.sql}
+                """,
+                memory_id,
+                *predicate.params,
+            )
+            return _row_to_record(row) if row is not None else None
+        finally:
+            if own:
+                await conn.close()
+
     async def query(
         self,
         principal: Principal,

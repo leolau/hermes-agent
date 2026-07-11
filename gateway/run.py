@@ -8918,6 +8918,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _cmd_def_inner and _cmd_def_inner.name == "kanban":
                 return await self._handle_kanban_command(event)
 
+            # Durable goal management is independent coordination state. It is
+            # safe during an active run and only affects appended future
+            # context/tool results, never the live prompt or toolset.
+            if _cmd_def_inner and _cmd_def_inner.name == "goals":
+                return await self._handle_goals_command(event)
+
             # /goal is safe mid-run for status/pause/clear/wait (inspection
             # and control-plane only — doesn't interrupt the running turn).
             # Setting a new goal text mid-run is rejected with the same
@@ -9443,6 +9449,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "goal":
             return await self._handle_goal_command(event)
+
+        if canonical == "goals":
+            return await self._handle_goals_command(event)
 
         if canonical == "moa":
             # /moa is one-shot sugar only: run a single prompt through the

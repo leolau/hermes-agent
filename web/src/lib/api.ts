@@ -1250,6 +1250,57 @@ export const api = {
     fetchJSON<CommsGoalsResponse>(
       `/api/comms/goals${status ? `?status=${encodeURIComponent(status)}` : ""}`,
     ),
+  createCommsGoal: (body: {
+    title: string;
+    description?: string;
+    priority?: string;
+    visibility?: string;
+  }) =>
+    fetchJSON<CommsGoalResponse>("/api/comms/goals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  prioritiseCommsGoal: (id: string, priority: string) =>
+    fetchJSON<CommsGoalResponse>(
+      `/api/comms/goals/${encodeURIComponent(id)}/priority`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ priority }),
+      },
+    ),
+  linkCommsGoal: (
+    id: string,
+    resource_kind: CommsGoalResourceKind,
+    resource_ref: string,
+  ) =>
+    fetchJSON<CommsGoalLinkResponse>(
+      `/api/comms/goals/${encodeURIComponent(id)}/links`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resource_kind, resource_ref }),
+      },
+    ),
+  advanceCommsGoal: (id: string, body: CommsGoalAdvanceRequest) =>
+    fetchJSON<CommsGoalAdvanceResponse>(
+      `/api/comms/goals/${encodeURIComponent(id)}/advance`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  closeCommsGoal: (id: string) =>
+    fetchJSON<CommsGoalResponse>(
+      `/api/comms/goals/${encodeURIComponent(id)}/close`,
+      { method: "POST" },
+    ),
+  getCommsGoalContext: (id: string) =>
+    fetchJSON<CommsGoalContextResponse>(
+      `/api/comms/goals/${encodeURIComponent(id)}/context`,
+    ),
   getCommsChanges: () => fetchJSON<CommsChangesResponse>("/api/comms/changes"),
   undoCommsChange: (id: string) =>
     fetchJSON<CommsChangeActionResponse>(
@@ -1323,6 +1374,59 @@ export interface CommsGoalsResponse {
   configured: boolean;
   principal?: string | null;
   goals: CommsGoal[];
+}
+
+export type CommsGoalResourceKind = "memory" | "task" | "tool";
+
+export interface CommsGoalLink {
+  goal_id: string;
+  resource_kind: CommsGoalResourceKind;
+  resource_ref: string;
+  owner_user_id: string;
+  visibility: string;
+  created_at: string | null;
+}
+
+export interface CommsGoalResponse {
+  ok: boolean;
+  goal: CommsGoal;
+}
+
+export interface CommsGoalLinkResponse {
+  ok: boolean;
+  link: CommsGoalLink;
+}
+
+export type CommsGoalAdvanceRequest =
+  | { target: "task"; task_id: string; state: string }
+  | {
+      target: "metric";
+      metric_name: string;
+      value: number;
+      note?: string;
+    }
+  | { target: "note"; note: string };
+
+export interface CommsGoalAdvanceResponse {
+  ok: boolean;
+  task?: Record<string, unknown>;
+  metric?: Record<string, unknown>;
+}
+
+export interface CommsGoalContext {
+  goal: CommsGoal;
+  metrics: Record<string, unknown>[];
+  progress: Record<string, unknown>[];
+  resources: {
+    link: CommsGoalLink;
+    resource: Record<string, unknown>;
+  }[];
+}
+
+export interface CommsGoalContextResponse {
+  configured: boolean;
+  principal?: string | null;
+  context: CommsGoalContext;
 }
 
 export interface CommsChange {
