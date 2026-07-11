@@ -3019,6 +3019,319 @@ async def gateway_drain(request: Request):
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# FG-10 — human-comms parity (Telegram + web). C1-authenticated principals,
+# C2-scoped reads, C6-gated approvals, one pending-item surface shared with
+# Telegram (answering on web clears the Telegram item and vice-versa). All
+# datastore access routes through the C3 router at the *prod* schema so both
+# surfaces read/write the same rows. See docs/design/master-plan/
+# feature-groups/FG-10-human-comms.md.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class _CommsNotConfigured(RuntimeError):
+    """The Supabase app datastore isn't configured for this instance."""
+
+
+def _comms_app_store():
+    """Return the prod supabase-app store (C3). Channels + web share prod."""
+    from hermes_cli.datastore import get_store
+
+    return get_store("supabase-app", "prod", config=load_config() or {})
+
+
+async def _comms_resolve_principal(request: "Request", *, allow_as: bool = False):
+    """Resolve the C1 principal a web request acts under (contract C1).
+
+    Trust model: the dashboard is an **owner-privileged operator surface** — it
+    is already gated by dashboard auth and exposes owner-level control (config,
+    secrets, every session), so an authenticated request is the machine
+    operator, who maps to the enrolled **owner** principal. That is the default
+    and the only identity permitted to *act* (write).
+
+    ``allow_as`` (read-only endpoints only) lets the owner-operator narrow the
+    C2 view to a specific principal via ``?as=`` / ``X-Hermes-User-Id`` — an
+    inspection aid, never an escalation: the owner can already read every row,
+    so scoping *down* to a member's view exposes nothing new. Write endpoints
+    pass ``allow_as=False`` so a mutation is always attributed to the owner and
+    can never spoof another principal's identity. (Per-web-user *sub-owner*
+    identity — binding a non-owner dashboard login to its own C1 principal — is
+    deferred to the dashboard-auth/enrollment work that owns that mapping.)
+
+    Never invents a principal: an unknown ``?as=`` id is a 404, and a machine
+    with no owner enrolled is a 409.
+    """
+    from hermes_cli.access import PrincipalStore
+
+    store = _comms_app_store()
+    principals = PrincipalStore(store)
+    requested = ""
+    if allow_as:
+        requested = (
+            request.query_params.get("as")
+            or request.headers.get("X-Hermes-User-Id")
+            or ""
+        ).strip()
+    try:
+        owner = await principals.get_owner()
+        if owner is None:
+            raise HTTPException(
+                status_code=409,
+                detail="No owner is enrolled yet; complete multi-user setup first.",
+            )
+        if requested and requested != owner.user_id:
+            principal = await principals.get(requested)
+            if principal is None:
+                raise HTTPException(
+                    status_code=404, detail=f"No such principal: {requested}"
+                )
+            return principal
+        return owner
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        # Unconfigured DSN (SupabaseAppStore.connect) — surface as a soft state
+        # the SPA renders as "multi-user datastore not configured".
+        raise _CommsNotConfigured(str(exc)) from exc
+
+
+def _comms_unconfigured_payload(key: str) -> dict:
+    return {"configured": False, key: [], "principal": None}
+
+
+@app.get("/api/comms/whoami")
+async def comms_whoami(request: Request):
+    """Return the resolved C1 principal + role for the current web request."""
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return {"configured": False, "principal": None}
+    return {
+        "configured": True,
+        "principal": {
+            "user_id": principal.user_id,
+            "display": principal.display,
+            "role": principal.role,
+            "channels": list(principal.channels),
+            "is_owner": principal.is_owner,
+        },
+    }
+
+
+@app.get("/api/comms/notifications")
+async def comms_list_notifications(request: Request):
+    """List pending approvals + proactive asks visible to the principal (C2)."""
+    from hermes_cli.human_comms import NotificationStore, parse_notification_kind
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return _comms_unconfigured_payload("notifications")
+    try:
+        kind = parse_notification_kind(request.query_params.get("kind"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    ntf = NotificationStore(_comms_app_store(), config=load_config() or {})
+    try:
+        await ntf.initialize()
+        items = await ntf.list_pending(principal, kind=kind)
+    except RuntimeError:
+        return _comms_unconfigured_payload("notifications")
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "notifications": [i.as_dict() for i in items],
+    }
+
+
+@app.post("/api/comms/notifications/{notification_id}/answer")
+async def comms_answer_notification(notification_id: str, request: Request):
+    """Answer a pending item from the web surface (dedupes with Telegram).
+
+    The answer is idempotent across surfaces: ``newly_answered`` is ``True``
+    only for the surface that settled the item first; a later answer from the
+    other surface returns the already-settled row with ``newly_answered``
+    ``False``.
+    """
+    from hermes_cli.human_comms import NotificationNotFound, NotificationStore
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    answer = str((body or {}).get("answer", "")).strip()
+    if not answer:
+        raise HTTPException(status_code=400, detail="answer is required")
+
+    principal = await _comms_resolve_principal(request)
+    ntf = NotificationStore(_comms_app_store(), config=load_config() or {})
+    try:
+        result = await ntf.answer(notification_id, principal, answer=answer, via="web")
+    except NotificationNotFound:
+        raise HTTPException(status_code=404, detail="No such notification")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return {
+        "ok": True,
+        "newly_answered": result.newly_answered,
+        "notification": result.notification.as_dict(),
+    }
+
+
+@app.get("/api/comms/goals")
+async def comms_list_goals(request: Request):
+    """List goals the principal may read (FG-04 registry, C2-scoped)."""
+    from hermes_cli.goal_registry import GoalRegistryStore
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return _comms_unconfigured_payload("goals")
+    status = request.query_params.get("status") or None
+    registry = GoalRegistryStore(_comms_app_store())
+    try:
+        await registry.initialize()
+        goals = await registry.list_goals(principal, status=status)
+    except RuntimeError:
+        return _comms_unconfigured_payload("goals")
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "goals": [
+            {
+                "id": g.id,
+                "title": g.title,
+                "description": g.description,
+                "priority": g.priority,
+                "status": g.status,
+                "visibility": g.visibility,
+                "owner_user_id": g.owner_user_id,
+            }
+            for g in goals
+        ],
+    }
+
+
+def _comms_change_dict(event) -> dict:
+    return {
+        "id": event.id,
+        "actor_user_id": event.actor_user_id,
+        "mode": event.mode,
+        "target_kind": event.target_kind,
+        "reversible": event.reversible,
+        "visibility": event.visibility,
+        "undone": event.undone,
+    }
+
+
+@app.get("/api/comms/changes")
+async def comms_list_changes(request: Request):
+    """List change events the principal may review (FG-12 log, C2-scoped)."""
+    from hermes_cli.changes import ChangeLog
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return _comms_unconfigured_payload("changes")
+    log = ChangeLog(config=load_config() or {})
+    try:
+        changes = await log.list_changes(principal)
+    except RuntimeError:
+        return _comms_unconfigured_payload("changes")
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "changes": [_comms_change_dict(c) for c in changes],
+    }
+
+
+@app.post("/api/comms/changes/{change_ref}/undo")
+async def comms_undo_change(change_ref: str, request: Request):
+    """Undo a visible, reversible change (FG-12, C2 + D6 enforced)."""
+    from hermes_cli.changes import ChangeError, ChangeLog, ChangeNotFound
+
+    principal = await _comms_resolve_principal(request)
+    log = ChangeLog(config=load_config() or {})
+    try:
+        result = await log.undo(change_ref, principal)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ChangeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ChangeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True, "change_ref": result.change_ref, "target_kind": result.target_kind}
+
+
+@app.post("/api/comms/changes/{change_ref}/redo")
+async def comms_redo_change(change_ref: str, request: Request):
+    """Redo a previously-undone, visible change (FG-12, C2 enforced)."""
+    from hermes_cli.changes import ChangeError, ChangeLog, ChangeNotFound
+
+    principal = await _comms_resolve_principal(request)
+    log = ChangeLog(config=load_config() or {})
+    try:
+        result = await log.redo(principal, change_ref=change_ref)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ChangeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ChangeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True, "change_ref": result.change_ref, "target_kind": result.target_kind}
+
+
+@app.get("/api/comms/memory")
+async def comms_list_memory(request: Request):
+    """List recent memories the principal may read (FG-05 store, C2-scoped).
+
+    A read-only projection over the FG-05 ``memories`` table via the C3 store +
+    ``scope_filter`` — no embeddings needed for a recency listing, so this does
+    not touch FG-05's write/query path.
+    """
+    from hermes_cli.access import scope_filter
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return _comms_unconfigured_payload("memories")
+    store = _comms_app_store()
+    # Read-only recency projection over FG-05's ``memories`` table (its content
+    # column is ``text``). Scoped by C2 ``scope_filter``; the embedding column
+    # is never selected, so no pgvector type codec is needed here.
+    predicate = scope_filter(principal, column="visibility", start_index=1)
+    sql = (
+        "SELECT id, kind, topic, text, visibility, created_at "
+        "FROM memories WHERE " + predicate.sql +
+        " ORDER BY created_at DESC LIMIT 100"
+    )
+    try:
+        conn = await store.connect()
+    except RuntimeError:
+        return _comms_unconfigured_payload("memories")
+    try:
+        # The memory plugin may never have initialised its table on this
+        # instance — treat "table absent" as an empty list, not an error.
+        exists = await conn.fetchval("SELECT to_regclass('memories')")
+        if exists is None:
+            return {"configured": True, "principal": principal.user_id, "memories": []}
+        rows = await conn.fetch(sql, *predicate.params)
+        memories = [
+            {
+                "id": str(r["id"]),
+                "kind": r["kind"],
+                "topic": r["topic"],
+                "content": r["text"],
+                "visibility": r["visibility"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ]
+    finally:
+        await conn.close()
+    return {"configured": True, "principal": principal.user_id, "memories": memories}
+
+
 @app.post("/api/hermes/update")
 async def update_hermes():
     """Kick off ``hermes update`` in the background."""
