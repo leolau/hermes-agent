@@ -273,11 +273,11 @@ class TodoStore:
         return [todos[i] for i in sorted(last_index.values())]
 
 
-def todo_principal(user_id: Optional[str]) -> Principal:
+def todo_principal(user_id: Optional[str]) -> Optional[Principal]:
     clean = str(user_id or "").strip()
     if clean:
         return Principal(user_id=clean, display=clean, role="member")
-    return Principal(user_id="owner", display="owner", role="owner")
+    return None
 
 
 def todo_tool(

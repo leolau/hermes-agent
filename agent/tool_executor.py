@@ -1164,11 +1164,18 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     todo_principal as _todo_principal,
                     todo_tool as _todo_tool,
                 )
+                principal = _todo_principal(agent._internal_user_id)
+                if principal is None:
+                    return _todo_tool(
+                        todos=next_args.get("todos"),
+                        merge=next_args.get("merge", False),
+                        store=agent._todo_store,
+                    )
                 return _todo_tool(
                     todos=next_args.get("todos"),
                     merge=next_args.get("merge", False),
                     store=agent._todo_store,
-                    principal=_todo_principal(agent._internal_user_id),
+                    principal=principal,
                 )
             function_result, function_args = _run_agent_tool_execution_middleware(
                 agent,
