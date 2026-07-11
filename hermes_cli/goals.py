@@ -331,6 +331,194 @@ class GoalContract:
         return "\n".join(lines)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Measurable success criteria (FG-04)
+# ──────────────────────────────────────────────────────────────────────
+
+# Priority bands for registry goals, ordered most→least urgent. Kept as an
+# ordered tuple (not an enum frozen into a change-detector test) so callers
+# assert the *ordering* invariant, never a specific member count.
+GOAL_PRIORITIES: Tuple[str, ...] = ("critical", "high", "medium", "low")
+DEFAULT_GOAL_PRIORITY = "medium"
+
+#: Weight each priority band contributes when splitting a shared turn budget.
+#: Higher band → strictly larger weight (the scheduling invariant the tests
+#: assert, rather than the literal numbers).
+_PRIORITY_WEIGHTS = {"critical": 8, "high": 4, "medium": 2, "low": 1}
+
+# Comparison directions for a metric target.
+_METRIC_AT_LEAST = "at_least"
+_METRIC_AT_MOST = "at_most"
+_METRIC_DIRECTIONS = (_METRIC_AT_LEAST, _METRIC_AT_MOST)
+
+_METRIC_FIELDS = (
+    "name",
+    "target",
+    "current",
+    "unit",
+    "source_query",
+    "cadence",
+    "direction",
+)
+
+
+def priority_rank(priority: str) -> int:
+    """Return the ordering rank of ``priority`` (0 = most urgent).
+
+    Unknown values sort *after* every known band so a typo never jumps the
+    queue. This is the single source of truth for how goals order by priority.
+    """
+    try:
+        return GOAL_PRIORITIES.index(priority)
+    except ValueError:
+        return len(GOAL_PRIORITIES)
+
+
+def normalize_priority(priority: Optional[str]) -> str:
+    """Validate/normalize a priority band, falling back to the default."""
+    if priority is None:
+        return DEFAULT_GOAL_PRIORITY
+    value = str(priority).strip().lower()
+    return value if value in _PRIORITY_WEIGHTS else DEFAULT_GOAL_PRIORITY
+
+
+def priority_weight(priority: str) -> int:
+    """Turn-budget weight for a priority band (higher band → larger weight)."""
+    return _PRIORITY_WEIGHTS[normalize_priority(priority)]
+
+
+@dataclass
+class GoalMetric:
+    """A measurable success criterion for a registry goal (FG-04).
+
+    ``target`` and ``current`` are numeric; whether the metric is *achieved*
+    and how much *incremental progress* has been made are **computed** from
+    them — never asserted by the model as a vibe. ``source_query`` names where
+    ``current`` is refreshed from (a live-store query or a tool) and
+    ``cadence`` how often; the proactive monitor uses them to keep ``current``
+    fresh. A metric whose ``target`` is ``None`` is *unmeasured*: the monitor
+    solicits the missing target from the user (respecting contract C6) rather
+    than the agent inventing one.
+    """
+
+    name: str
+    target: Optional[float] = None
+    current: float = 0.0
+    unit: str = ""
+    source_query: str = ""
+    cadence: str = ""
+    direction: str = _METRIC_AT_LEAST
+
+    def __post_init__(self) -> None:
+        if self.direction not in _METRIC_DIRECTIONS:
+            self.direction = _METRIC_AT_LEAST
+
+    def is_measurable(self) -> bool:
+        """Whether a numeric target has been set (achievement is computable)."""
+        return self.target is not None
+
+    @property
+    def achieved(self) -> bool:
+        """True when ``current`` satisfies ``target`` in the metric direction.
+
+        Always ``False`` while unmeasured (no target) — you cannot achieve an
+        unset target.
+        """
+        if self.target is None:
+            return False
+        if self.direction == _METRIC_AT_MOST:
+            return self.current <= self.target
+        return self.current >= self.target
+
+    @property
+    def progress_fraction(self) -> float:
+        """Incremental progress toward the target, clamped to ``[0.0, 1.0]``.
+
+        ``0.0`` while unmeasured. For an ``at_least`` metric this is
+        ``current / target``; for ``at_most`` it is ``1.0`` once at/under
+        target and decays as ``current`` overshoots. Monotonic in the "closer
+        to done" sense for both directions.
+        """
+        if self.target is None:
+            return 0.0
+        if self.achieved:
+            return 1.0
+        if self.direction == _METRIC_AT_MOST:
+            if self.current <= 0:
+                return 1.0
+            return max(0.0, min(1.0, float(self.target) / float(self.current)))
+        if self.target == 0:
+            return 1.0
+        return max(0.0, min(1.0, float(self.current) / float(self.target)))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {f: getattr(self, f) for f in _METRIC_FIELDS}
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> "GoalMetric":
+        if not isinstance(data, dict):
+            raise ValueError("GoalMetric.from_dict requires a mapping")
+        target = data.get("target")
+        return cls(
+            name=str(data.get("name") or "").strip(),
+            target=(float(target) if target is not None else None),
+            current=float(data.get("current") or 0.0),
+            unit=str(data.get("unit") or "").strip(),
+            source_query=str(data.get("source_query") or "").strip(),
+            cadence=str(data.get("cadence") or "").strip(),
+            direction=str(data.get("direction") or _METRIC_AT_LEAST),
+        )
+
+
+def render_metrics_block(metrics: List[GoalMetric]) -> str:
+    """Render metrics as a labelled block for the continuation / judge prompt.
+
+    Cache-safe by construction: the caller only ever appends this to a
+    continuation *user* message or hands it to the judge model — it is never
+    spliced into the byte-stable system prompt.
+    """
+    if not metrics:
+        return ""
+    lines: List[str] = []
+    for m in metrics:
+        unit = f" {m.unit}" if m.unit else ""
+        if m.is_measurable():
+            status = "ACHIEVED" if m.achieved else f"{m.progress_fraction * 100:.0f}%"
+            lines.append(
+                f"- {m.name}: {m.current}{unit} / target {m.target}{unit} ({status})"
+            )
+        else:
+            lines.append(f"- {m.name}: no target set yet (unmeasured)")
+    return "\n".join(lines)
+
+
+def metrics_all_achieved(metrics: List[GoalMetric]) -> bool:
+    """True only when there is ≥1 metric, all measurable, and all achieved."""
+    if not metrics:
+        return False
+    return all(m.is_measurable() and m.achieved for m in metrics)
+
+
+def verdict_for_metrics(metrics: List[GoalMetric]) -> Tuple[str, str]:
+    """Compute a judge-facing verdict purely from metric state (FG-04).
+
+    Returns ``(verdict, reason)``. ``done`` only when every metric is measured
+    and achieved; an unmeasured metric yields ``continue`` (the proactive
+    monitor resolves the missing target instead of the agent guessing). This
+    lets the judge *see the metric in the verdict* without the loop deciding
+    "done" on vibes.
+    """
+    if not metrics:
+        return "continue", "no metrics defined"
+    unmeasured = [m.name for m in metrics if not m.is_measurable()]
+    if unmeasured:
+        return "continue", "metric(s) lack a target: " + ", ".join(unmeasured)
+    unmet = [m.name for m in metrics if not m.achieved]
+    if unmet:
+        return "continue", "metric(s) not yet at target: " + ", ".join(unmet)
+    return "done", "all metrics achieved"
+
+
 def parse_contract(text: str) -> Tuple[str, GoalContract]:
     """Split user-typed goal text into a headline + structured contract.
 
@@ -1743,6 +1931,15 @@ def run_kanban_goal_loop(
 __all__ = [
     "GoalState",
     "GoalContract",
+    "GoalMetric",
+    "GOAL_PRIORITIES",
+    "DEFAULT_GOAL_PRIORITY",
+    "priority_rank",
+    "normalize_priority",
+    "priority_weight",
+    "render_metrics_block",
+    "metrics_all_achieved",
+    "verdict_for_metrics",
     "GoalManager",
     "parse_contract",
     "draft_contract",
