@@ -920,7 +920,7 @@ class TestE2EPermissions:
 
 
 # ---------------------------------------------------------------------------
-# 4. TOOL LISTING — verify all 10 tools are registered
+# 4. TOOL LISTING — verify all 13 tools are registered
 # ---------------------------------------------------------------------------
 
 class TestToolRegistration:
@@ -934,6 +934,8 @@ class TestToolRegistration:
             "attachments_fetch", "events_poll", "events_wait",
             "messages_send", "channels_list",
             "permissions_list_open", "permissions_respond",
+            # FG-11 principal-aware, C2-scoped agent-comms surface.
+            "whoami", "memory_search", "memory_add",
         }
         assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 
