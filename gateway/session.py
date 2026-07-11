@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Literal, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +178,15 @@ class SessionSource:
             self.scope_id = self.guild_id
         elif self.scope_id is not None:
             self.guild_id = self.scope_id
+
+    def resolve_datastore_mode(
+        self,
+        requested: Literal["dev", "prod"] | None = None,
+    ) -> Literal["dev", "prod"]:
+        """Resolve mode with the channel-origin production guard applied."""
+        from hermes_cli.datastore import resolve_mode
+
+        return resolve_mode(requested, source=self)
 
     @property
     def description(self) -> str:
