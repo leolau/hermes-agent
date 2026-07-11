@@ -48,13 +48,20 @@ profile-scoped as today.
 - **Cache-safety test:** a mid-turn `memory_query` does NOT mutate the system prompt (assert prompt prefix byte-stable across a turn that queries memory).
 - Baseline green.
 
+## System testing (system-test box)
+**Required step after this FG's development completes** (part of its Definition of Done), on top of the per-PR unit/E2E + baseline gate: deploy this FG to the new ai-prentice ECS (`hermes-systest`, `i-j6c81aisv2dd8mg17yle`, 4/16, cn-hongkong-b, EIP `47.83.199.25`) — the dedicated **system-test host** — and exercise it end-to-end on the real stack against a **staging** Supabase schema (`app_staging`) + staging SQLite core (**never prod**). See README §7.1. Acceptance checklist:
+- Under **real concurrent `(user,task)` sessions** on the box, exercise pgvector semantic recall + concurrent writes; no lost writes, no cross-session bleed.
+- Confirm per-user private vs shared memory scoping via **real RLS**; owner sees all.
+- Confirm the frozen curated snapshot stays **cache-safe** (a mid-turn `memory_query` does not mutate the live system prompt).
+- **Gate:** this FG is not complete/promotable until this ECS checklist passes (on top of the per-PR gate).
+
 ## Dependencies
 - **Blocked by:** FG-13 (C3), FG-01 (C2 scoping).
 - **Blocks:** FG-03 (shared coordination state), FG-04 (goal context), FG-06 (task context), FG-09.
 - Consumes **C2, C3**; the D2 hybrid decision is finalised here (resolves the open item from `AGENT-HANDOFF.md §3`).
 
 ## Definition of Done
-Tests green (incl. concurrency + negative access + cache-safety) + baseline green + `ruff`/`ty` clean; pgvector provider registered via the memory-provider ABC; curated snapshot semantics untouched.
+Tests green (incl. concurrency + negative access + cache-safety) + baseline green + `ruff`/`ty` clean; pgvector provider registered via the memory-provider ABC; curated snapshot semantics untouched; **ECS system test green**.
 
 ## Progress checklist
 - [ ] Supabase/pgvector memory provider (via existing ABC)
@@ -62,11 +69,13 @@ Tests green (incl. concurrency + negative access + cache-safety) + baseline gree
 - [ ] visibility scoping + RLS
 - [ ] concurrency + negative-access + cache-safety tests
 - [ ] curated-tier snapshot untouched (regression check)
+- [ ] System test on the system-test ECS passed (see *System testing* section)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
+| 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
 
 ## Cloud-agent prompt
-> **[Wave 0 — start after FG-13 C3 + FG-01 C2 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-05`). Implement **hybrid embedding memory with concurrency** (finalising the open memory-consistency decision in `docs/design/AGENT-HANDOFF.md §3`): keep `tools/memory_tool.py`'s frozen `MEMORY.md`/`USER.md` snapshot as the cache-safe curated tier (DO NOT break its snapshot semantics); add a **live tier** = a Supabase **Postgres + pgvector** memory provider registered through the existing `plugins/memory/*` ABC, exposed via `memory_query`/`memory_write` tools whose results are **appended messages** (never injected into the system prompt — prove cache-safety with a test). Scope every memory row with `owner_user_id` + `visibility` (contract C2) enforced by RLS; owner sees all. Use Postgres MVCC for concurrent `(user,task)` cores. Follow `AGENTS.md` (footprint ladder, cache-sacred, no core-tool growth). Add unit + **concurrency** + **negative-access** + **cache-safety** tests against temp `HERMES_HOME` + throwaway Postgres schema; keep `tests/plan_baseline/` green; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc.
+> **[Wave 0 — start after FG-13 C3 + FG-01 C2 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-05`). Implement **hybrid embedding memory with concurrency** (finalising the open memory-consistency decision in `docs/design/AGENT-HANDOFF.md §3`): keep `tools/memory_tool.py`'s frozen `MEMORY.md`/`USER.md` snapshot as the cache-safe curated tier (DO NOT break its snapshot semantics); add a **live tier** = a Supabase **Postgres + pgvector** memory provider registered through the existing `plugins/memory/*` ABC, exposed via `memory_query`/`memory_write` tools whose results are **appended messages** (never injected into the system prompt — prove cache-safety with a test). Scope every memory row with `owner_user_id` + `visibility` (contract C2) enforced by RLS; owner sees all. Use Postgres MVCC for concurrent `(user,task)` cores. Follow `AGENTS.md` (footprint ladder, cache-sacred, no core-tool growth). Add unit + **concurrency** + **negative-access** + **cache-safety** tests against temp `HERMES_HOME` + throwaway Postgres schema; keep `tests/plan_baseline/` green; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.

@@ -53,12 +53,18 @@ Registry/provenance in `app_*`.
 - Negative: mint/irreversible not involved; unapproved acquisition cannot run.
 - Baseline green.
 
+## System testing (system-test box)
+**Required step after this FG's development completes** (part of its Definition of Done), on top of the per-PR unit/E2E + baseline gate: deploy this FG to the new ai-prentice ECS (`hermes-systest`, `i-j6c81aisv2dd8mg17yle`, 4/16, cn-hongkong-b, EIP `47.83.199.25`) — the dedicated **system-test host** — and exercise it end-to-end on the real stack against a **staging** Supabase schema (`app_staging`) + staging SQLite core (**never prod**). See README §7.1. Acceptance checklist:
+- Remote path: clone + host a small **approved** OSS project on a **separate** host and reach it via MCP from the ECS; confirm the §4.3 hard rails (license allowlist, ≥2 approvals, non-root/network-restricted, commit-pin) are enforced live.
+- In-house path: build a small tool via the FG-07 scaffolder on the box; confirm provenance recorded and dev→prod promotion works.
+- **Gate:** this FG is not complete/promotable until this ECS checklist passes (on top of the per-PR gate).
+
 ## Dependencies
 - **Blocked by:** FG-07 (scaffolder + registry), FG-11 (MCP), FG-12 (C5/C6).
 - **Blocks:** FG-09 (tools as goal resources).
 
 ## Definition of Done
-Tests green + baseline green + `ruff`/`ty` clean; remote path follows §4.3 hard rails incl. ≥2 approvals + license allowlist; no third-party OSS vendored into the core tree; in-house path reuses FG-07.
+Tests green + baseline green + `ruff`/`ty` clean; remote path follows §4.3 hard rails incl. ≥2 approvals + license allowlist; no third-party OSS vendored into the core tree; in-house path reuses FG-07; **ECS system test green**.
 
 ## Progress checklist
 - [ ] GitHub discovery + candidate presentation (approval)
@@ -66,11 +72,13 @@ Tests green + baseline green + `ruff`/`ty` clean; remote path follows §4.3 hard
 - [ ] In-house path via FG-07 scaffolder
 - [ ] Provenance + commit pin + retire pass
 - [ ] tests (unit + remote E2E mocked + in-house E2E + negative) green
+- [ ] System test on the system-test ECS passed (see *System testing* section)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
+| 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
 
 ## Cloud-agent prompt
-> **[Wave 2 — start after FG-07 + FG-11 + FG-12 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md`, this doc (`FG-08`), and `docs/design/architecture-design-number-one.md §4.3` (authoritative). Implement OSS acquisition in two modes (D3): (1) **Remote system** — follow §4.3's 6-stage pipeline (propose→vet→adapt→run→expose-MCP→retire) with ALL hard rails (license allowlist, supply-chain+secret scan, non-root, network-restricted, commit-pinned, **≥2 human approvals** via contract C6), cloning/hosting the project **on a different machine** (use `tools/environments/*` ssh/remote backends) and reaching it via a `fastmcp` MCP registered through FG-11 — do NOT vendor the third-party project under the core repo tree (per `AGENTS.md`); (2) **In-house system** — reuse FG-07's Next.js scaffolder (web UI + MCP). Default to remote/adapt-and-wrap; in-house rebuild only on explicit request or when no suitable OSS exists. Record provenance; start in dev, promote via FG-13; emit C5 change events. Add unit + remote E2E (mocked host) + in-house E2E + negative (license-reject, unapproved-cannot-run) tests; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc.
+> **[Wave 2 — start after FG-07 + FG-11 + FG-12 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md`, this doc (`FG-08`), and `docs/design/architecture-design-number-one.md §4.3` (authoritative). Implement OSS acquisition in two modes (D3): (1) **Remote system** — follow §4.3's 6-stage pipeline (propose→vet→adapt→run→expose-MCP→retire) with ALL hard rails (license allowlist, supply-chain+secret scan, non-root, network-restricted, commit-pinned, **≥2 human approvals** via contract C6), cloning/hosting the project **on a different machine** (use `tools/environments/*` ssh/remote backends) and reaching it via a `fastmcp` MCP registered through FG-11 — do NOT vendor the third-party project under the core repo tree (per `AGENTS.md`); (2) **In-house system** — reuse FG-07's Next.js scaffolder (web UI + MCP). Default to remote/adapt-and-wrap; in-house rebuild only on explicit request or when no suitable OSS exists. Record provenance; start in dev, promote via FG-13; emit C5 change events. Add unit + remote E2E (mocked host) + in-house E2E + negative (license-reject, unapproved-cannot-run) tests; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.

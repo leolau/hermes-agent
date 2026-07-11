@@ -52,13 +52,19 @@ still log changes.
 - E2E: edit a file → change logged → undo restores via checkpoint → redo re-applies; config change round-trips; backup_ref restorable.
 - Negative access: non-owner can't undo another user's private change; owner can.
 
+## System testing (system-test box)
+**Required step after this FG's development completes** (part of its Definition of Done), on top of the per-PR unit/E2E + baseline gate: deploy this FG to the new ai-prentice ECS (`hermes-systest`, `i-j6c81aisv2dd8mg17yle`, 4/16, cn-hongkong-b, EIP `47.83.199.25`) — the dedicated **system-test host** — and exercise it end-to-end on the real stack against a **staging** Supabase schema (`app_staging`) + staging SQLite core (**never prod**). See README §7.1. Acceptance checklist:
+- On real data/config/code changes on the box: confirm each is recorded in the change log; **undo/redo** works (code via checkpoint restore, config/data via inverse-op); a backup is restorable.
+- Confirm the ERC-721 mint change is `reversible=false` and undo refuses it.
+- **Gate:** this FG is not complete/promotable until this ECS checklist passes (on top of the per-PR gate).
+
 ## Dependencies
 - **Blocked by:** FG-13 (C3), FG-01 (C2 actor/scope).
 - **Blocks:** everything mutating (they emit C5) + FG-07/10 (render log) + FG-02 (marks mint irreversible).
 - Publishes **C5, C6**.
 
 ## Definition of Done
-Tests green (incl. irreversibility) + baseline green + `ruff`/`ty` clean; C5/C6 documented; undo/redo works for code/config/data via reused engines; ERC-721 exception honoured.
+Tests green (incl. irreversibility) + baseline green + `ruff`/`ty` clean; C5/C6 documented; undo/redo works for code/config/data via reused engines; ERC-721 exception honoured; **ECS system test green**.
 
 ## Progress checklist
 - [ ] C5 append-only change log + emission hooks
@@ -67,11 +73,13 @@ Tests green (incl. irreversibility) + baseline green + `ruff`/`ty` clean; C5/C6 
 - [ ] Backup integration (`backup_ref`)
 - [ ] Irreversible-mint exception + test
 - [ ] tests (unit + E2E + negative + irreversibility) green
+- [ ] System test on the system-test ECS passed (see *System testing* section)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
+| 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
 
 ## Cloud-agent prompt
-> **[Wave 1 — start after Wave 0 merges]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-12`). Build the **change-management module**. Publish contract **C5** = append-only `changes(id, ts, actor_user_id, mode, target_kind∈{data,config,code}, op, inverse_op|null, reversible, approval_ref, backup_ref, payload)` and make every mutating capability emit one. Implement **undo/redo**: code/files via `tools/checkpoint_manager.py` `restore` (REUSE it), config via inverse-op replay, data via reversible inverse-ops + a redo stack. Publish contract **C6** = one approval/consent policy wrapping `tools/approval.py`+`tools/write_approval.py` with quiet-hours/rate-limit/consent (shared with FG-10 and used by 4.1/6.1). Wire **backup** (`hermes_cli/backup.py`) as `backup_ref`. Honour the documented exception: an **ERC-721 mint is `reversible=false`** and undo must refuse it (D6). Scope changes by contract C2 (owner sees/undoes all). Follow `AGENTS.md` (cache-sacred, footprint ladder, extend not duplicate). Add unit + E2E + negative-access + **irreversibility** tests (temp `HERMES_HOME` + throwaway Postgres); run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc.
+> **[Wave 1 — start after Wave 0 merges]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-12`). Build the **change-management module**. Publish contract **C5** = append-only `changes(id, ts, actor_user_id, mode, target_kind∈{data,config,code}, op, inverse_op|null, reversible, approval_ref, backup_ref, payload)` and make every mutating capability emit one. Implement **undo/redo**: code/files via `tools/checkpoint_manager.py` `restore` (REUSE it), config via inverse-op replay, data via reversible inverse-ops + a redo stack. Publish contract **C6** = one approval/consent policy wrapping `tools/approval.py`+`tools/write_approval.py` with quiet-hours/rate-limit/consent (shared with FG-10 and used by 4.1/6.1). Wire **backup** (`hermes_cli/backup.py`) as `backup_ref`. Honour the documented exception: an **ERC-721 mint is `reversible=false`** and undo must refuse it (D6). Scope changes by contract C2 (owner sees/undoes all). Follow `AGENTS.md` (cache-sacred, footprint ladder, extend not duplicate). Add unit + E2E + negative-access + **irreversibility** tests (temp `HERMES_HOME` + throwaway Postgres); run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.

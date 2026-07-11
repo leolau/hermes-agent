@@ -44,12 +44,18 @@ dev sessions.
 - E2E: scaffold an in-house tool → runs its own Node process → web UI + MCP both reachable → register endpoint → enable → promote dev→prod (approval + change-event).
 - Baseline green.
 
+## System testing (system-test box)
+**Required step after this FG's development completes** (part of its Definition of Done), on top of the per-PR unit/E2E + baseline gate: deploy this FG to the new ai-prentice ECS (`hermes-systest`, `i-j6c81aisv2dd8mg17yle`, 4/16, cn-hongkong-b, EIP `47.83.199.25`) — the dedicated **system-test host** — and exercise it end-to-end on the real stack against a **staging** Supabase schema (`app_staging`) + staging SQLite core (**never prod**). See README §7.1. Acceptance checklist:
+- Scaffold an in-house Next.js tool on the ECS running in its **own Node process/port**; confirm BOTH its **web UI** and its **MCP** are reachable on the box.
+- From the dashboard: enable/disable/configure the tool and **promote dev→prod** (approval + change-event); confirm health + change log render.
+- **Gate:** this FG is not complete/promotable until this ECS checklist passes (on top of the per-PR gate).
+
 ## Dependencies
 - **Blocked by:** FG-13 (C3), FG-01 (C2), FG-11 (MCP registration), FG-12 (C5/C6).
 - **Blocks:** FG-08 (in-house build path), FG-09, FG-10 (shares dashboard).
 
 ## Definition of Done
-Tests green + baseline green + `ruff`/`ty` (Python) + web lint/typecheck clean; scaffolded tool exposes both web UI + MCP; dashboard manages lifecycle; no new non-secret env vars; `data-component` convention applied to new web components.
+Tests green + baseline green + `ruff`/`ty` (Python) + web lint/typecheck clean; scaffolded tool exposes both web UI + MCP; dashboard manages lifecycle; no new non-secret env vars; `data-component` convention applied to new web components; **ECS system test green**.
 
 ## Progress checklist
 - [ ] Tool registry (scope/mode/status)
@@ -57,11 +63,13 @@ Tests green + baseline green + `ruff`/`ty` (Python) + web lint/typecheck clean; 
 - [ ] Dashboard: manage/config/promote + health + change-log view
 - [ ] Config UX (config.yaml/config_json, no HERMES_* non-secret)
 - [ ] tests (unit + negative + E2E) green
+- [ ] System test on the system-test ECS passed (see *System testing* section)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
+| 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
 
 ## Cloud-agent prompt
-> **[Wave 2 — start after FG-11 + FG-12 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-07`). Implement **tool creation + configuration + dashboard**. Add a `mode`-aware, scope-aware (contract C2) **tool registry** in Supabase `app_*`. Build `hermes tool new <name>` (CLI+skill) that scaffolds an **in-house tool = Next.js app in its own Node process** exposing BOTH a **web UI** and a **thin MCP server** (registered via FG-11). Behavioural config lives in `config.yaml`/`config_json` — **never new `HERMES_*` env vars** (secrets only; auto-enable on credential presence per existing pattern). Extend the `web/` dashboard (React 19/Vite/Tailwind/Nous UI via `hermes_cli/web_server.py`) to list/enable/disable/configure/promote tools, show health, link the tool's web UI, and render the FG-12 change log. Tools start in **dev**, promote via FG-13 (approval + change-event C5/C6). New web components MUST carry `data-component="ComponentName"` on their root element. Follow `AGENTS.md` (tools are MCP-exposed, NOT new core tools; footprint ladder). Add unit + negative-access + E2E tests + web lint/typecheck; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc.
+> **[Wave 2 — start after FG-11 + FG-12 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-07`). Implement **tool creation + configuration + dashboard**. Add a `mode`-aware, scope-aware (contract C2) **tool registry** in Supabase `app_*`. Build `hermes tool new <name>` (CLI+skill) that scaffolds an **in-house tool = Next.js app in its own Node process** exposing BOTH a **web UI** and a **thin MCP server** (registered via FG-11). Behavioural config lives in `config.yaml`/`config_json` — **never new `HERMES_*` env vars** (secrets only; auto-enable on credential presence per existing pattern). Extend the `web/` dashboard (React 19/Vite/Tailwind/Nous UI via `hermes_cli/web_server.py`) to list/enable/disable/configure/promote tools, show health, link the tool's web UI, and render the FG-12 change log. Tools start in **dev**, promote via FG-13 (approval + change-event C5/C6). New web components MUST carry `data-component="ComponentName"` on their root element. Follow `AGENTS.md` (tools are MCP-exposed, NOT new core tools; footprint ladder). Add unit + negative-access + E2E tests + web lint/typecheck; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.

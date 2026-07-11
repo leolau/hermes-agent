@@ -47,12 +47,19 @@ approval. Registry in `app_*`.
 - E2E (testnet/mocked chain): asset → user-initiated mint → approval → token recorded; no-approval path blocked.
 - Baseline green.
 
+## System testing (system-test box)
+**Required step after this FG's development completes** (part of its Definition of Done), on top of the per-PR unit/E2E + baseline gate: deploy this FG to the new ai-prentice ECS (`hermes-systest`, `i-j6c81aisv2dd8mg17yle`, 4/16, cn-hongkong-b, EIP `47.83.199.25`) — the dedicated **system-test host** — and exercise it end-to-end on the real stack against a **staging** Supabase schema (`app_staging`) + staging SQLite core (**never prod**). See README §7.1. Acceptance checklist:
+- On the deployed box: create + resolve a DID:ION for a test user via the hosted resolver, bound to the principal.
+- Mint an ERC-721 on **testnet** from staging via the real **user-triggered + user-approved** flow; confirm gas/cost surfaced before approval.
+- Confirm the mint is recorded in the change log as `reversible=false` and FG-12 undo refuses it; confirm agent-autonomous mint is blocked on the live stack.
+- **Gate:** this FG is not complete/promotable until this ECS checklist passes (on top of the per-PR gate).
+
 ## Dependencies
 - **Blocked by:** FG-01 (C1), FG-11 (MCP), FG-12 (C5/C6 + irreversible marking).
 - **Blocks:** —
 
 ## Definition of Done
-Tests green (incl. irreversibility + autonomous-mint-blocked) + baseline green + `ruff`/`ty` clean; DID bound to principal; mint strictly user-triggered + user-approved; capability shipped as optional-skill + MCP (not core/in-tree plugin); testnet default.
+Tests green (incl. irreversibility + autonomous-mint-blocked) + baseline green + `ruff`/`ty` clean; **ECS system test green**; DID bound to principal; mint strictly user-triggered + user-approved; capability shipped as optional-skill + MCP (not core/in-tree plugin); testnet default.
 
 ## Progress checklist
 - [ ] DID:ION create/resolve bound to principal (hosted resolver)
@@ -61,11 +68,13 @@ Tests green (incl. irreversibility + autonomous-mint-blocked) + baseline green +
 - [ ] Mint recorded in C5 as `reversible=false`
 - [ ] testnet-first config; mainnet opt-in
 - [ ] tests (unit + irreversibility + E2E) green
+- [ ] System test on the system-test ECS passed (see *System testing* section)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
+| 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
 
 ## Cloud-agent prompt
-> **[Wave 2 — start after FG-01 + FG-11 + FG-12 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-02`). Implement **per-user DID:ION identity** (bound to `Principal.user_id`, hosted ION resolver first, custodial keys with a documented non-custodial upgrade path) and **ERC-721 minting per digital asset**. Extend `optional-skills/blockchain/evm` and expose chain operations as an **MCP server** registered via FG-11 — do NOT add a new core tool or vendor a blockchain product under `plugins/` (per `AGENTS.md`). Minting is the **explicit exception to undo (D6): it MUST be user-initiated AND user-approved (contract C6), and is recorded in the change log (contract C5) with `reversible=false` so FG-12 undo refuses it** — block agent-autonomous mint at the policy layer (test it). **Testnet/L2 by default**; mainnet only on explicit config + per-mint approval with gas/cost surfaced first. Add unit + **irreversibility** + autonomous-mint-blocked + E2E (mocked chain/resolver) tests; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc.
+> **[Wave 2 — start after FG-01 + FG-11 + FG-12 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-02`). Implement **per-user DID:ION identity** (bound to `Principal.user_id`, hosted ION resolver first, custodial keys with a documented non-custodial upgrade path) and **ERC-721 minting per digital asset**. Extend `optional-skills/blockchain/evm` and expose chain operations as an **MCP server** registered via FG-11 — do NOT add a new core tool or vendor a blockchain product under `plugins/` (per `AGENTS.md`). Minting is the **explicit exception to undo (D6): it MUST be user-initiated AND user-approved (contract C6), and is recorded in the change log (contract C5) with `reversible=false` so FG-12 undo refuses it** — block agent-autonomous mint at the policy layer (test it). **Testnet/L2 by default**; mainnet only on explicit config + per-mint approval with gas/cost surfaced first. Add unit + **irreversibility** + autonomous-mint-blocked + E2E (mocked chain/resolver) tests; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.
