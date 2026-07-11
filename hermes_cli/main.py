@@ -12653,6 +12653,14 @@ def main():
     register_tool_subparser(subparsers)
 
     # =========================================================================
+    # oss command — acquire OSS capabilities (remote adapt-and-wrap or
+    # in-house rebuild), approval-gated + provenance-tracked (FG-08)
+    # =========================================================================
+    from hermes_cli.oss_cmd import register_oss_subparser
+
+    register_oss_subparser(subparsers)
+
+    # =========================================================================
     # owner command — inspect/transfer the single shared-brain owner (C1)
     # =========================================================================
     from hermes_cli.owner import register_owner_subparser
