@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import subprocess
@@ -9,10 +10,16 @@ import time
 import uuid
 from collections.abc import Iterator
 
+import asyncpg
 import pytest
 
 from hermes_cli.datastore import get_store, initialize_supabase_app
 from hermes_cli.promote import promote_artifact
+
+
+async def _probe_postgres(dsn: str) -> None:
+    connection = await asyncpg.connect(dsn, ssl=False)
+    await connection.close()
 
 
 @pytest.fixture(scope="module")
@@ -62,18 +69,17 @@ def postgres_dsn() -> Iterator[str]:
             text=True,
         )
         port = port_result.stdout.strip().rsplit(":", 1)[1]
+        dsn = f"postgresql://postgres:hermes-test@127.0.0.1:{port}/hermes_test"
         for _ in range(60):
-            ready = subprocess.run(
-                ["docker", "exec", container, "pg_isready", "-U", "postgres"],
-                check=False,
-                capture_output=True,
-            )
-            if ready.returncode == 0:
+            try:
+                asyncio.run(_probe_postgres(dsn))
                 break
+            except (OSError, asyncpg.PostgresError):
+                pass
             time.sleep(0.25)
         else:
             raise RuntimeError("Throwaway Postgres did not become ready")
-        yield f"postgresql://postgres:hermes-test@127.0.0.1:{port}/hermes_test"
+        yield dsn
     finally:
         subprocess.run(
             ["docker", "rm", "--force", container],
