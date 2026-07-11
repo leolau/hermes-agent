@@ -1,6 +1,6 @@
 # FG-03 — Multi-channel redesign (one brain, all channels)
 
-**Wave:** 1 · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** 1 · **Owner agent:** devin:733e4888 · **Status:** In review (PR open into `develop`; ECS system-test pending owner coordination)
 
 ## Summary
 Route **every** incoming channel (N WhatsApp numbers, N emails, N calendars, …)
@@ -64,19 +64,21 @@ Channel ingestion forced to `prod` (C3 guard, tested). Coordination state in `ap
 Tests green + baseline green (session-key lock intact) + `ruff`/`ty` clean; Shape 1 in-process queue works E2E for ≥2 accounts; design-doc principles upheld (one brain, cache-safe); **ECS system test green**.
 
 ## Progress checklist
-- [ ] `SessionSource.account_id` + `session_key` fold-in (C4), single-account byte-stable
-- [ ] In-process inbound queue + bounded worker pool (Shape 1)
-- [ ] Producers stripped to thin normalizers (WhatsApp/email/calendar)
-- [ ] Calendar cron producer
-- [ ] Channel prod-only guard
-- [ ] tests + Shape-2 migration notes
-- [ ] System test on the system-test ECS passed (see *System testing* section)
+- [x] `SessionSource.account_id` (+ `internal_user_id` / `task`) + `session_key` fold-in (C4), single-account byte-stable
+- [x] In-process inbound queue + bounded worker pool (Shape 1) — `gateway/inbound.py` `InboundRouter` (per-session serial, cross-session parallel)
+- [x] Producers stripped to thin normalizers (WhatsApp/email/calendar) — `gateway/producers.py`
+- [x] Calendar cron producer — `gateway/producers.py` `calendar_event_to_inbound` / `run_calendar_sync`
+- [x] Channel prod-only guard — `gateway/inbound.py` `guard_channel_prod` (routes via C3 `resolve_mode`)
+- [x] Channel identity → Principal bound via the C1 `resolve_principal` seam — `gateway/inbound.py` `bind_channel_principal`
+- [x] tests + Shape-2 migration notes (unit + Postgres E2E incl. negative-access; Shape 2 documented in `gateway/inbound.py` + Design §3)
+- [ ] System test on the system-test ECS passed (see *System testing* section) — **pending owner (Leo) coordination; not accessible from this session**
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
 | 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
+| 2026-07-11 | 3 | devin:733e4888 | Implemented C4 (`SessionSource.account_id`/`internal_user_id`/`task` + `build_session_key` fold-in, byte-stable for single-account callers) and Shape 1 (`gateway/inbound.py` in-process `InboundRouter` queue+bounded pool with per-session-serial / cross-session-parallel turns; `gateway/producers.py` thin WhatsApp/email/calendar normalizers + calendar cron producer). Bound channel identity → Principal via the C1 `resolve_principal` seam; channels forced prod-only via the C3 router. Added unit tests + Postgres E2E (≥2 accounts isolated, principal binding, negative-access); baseline + `ruff`/`ty` clean. | Publish contract C4 early in Wave 1 (FG-06/FG-09 depend on it); realise one-brain-all-channels without per-channel silos while preserving prompt-cache safety. |
 
 ## Cloud-agent prompt
 > **[Wave 1 — start after Wave 0 merges]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md`, this doc (`FG-03`), and the authoritative designs `docs/design/architecture-design-number-one.md` + `docs/design/AGENT-HANDOFF.md`. Implement the **multi-channel redesign (one brain, all channels)**: (1) add `account_id` to `SessionSource` and fold it into `build_session_key` (contract C4) while keeping keys **byte-identical for existing single-account callers** — `tests/plan_baseline/test_session_key_baseline.py` must stay green; (2) build **Shape 1**: an in-process inbound queue + bounded async worker pool in the gateway, with the existing `custom/*` pollers reduced to thin producers emitting `(platform, account_id, sender_chat_id, payload)`, each routed to the per-session cached `AIAgent` (reuse `gateway/run.py`'s cache); (3) add a calendar cron producer into the same queue; (4) enforce **channels prod-only** via contract C3. Shared coordination state goes in the FG-05 live store via tool call (cache-safe) — never in the system prompt. Follow `AGENTS.md` (one brain/one profile, cache-sacred, footprint ladder). Add unit + E2E (≥2 accounts isolated) + prod-only guard tests; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.
