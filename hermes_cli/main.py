@@ -11929,7 +11929,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
-        "model", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
+        "model", "owner", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
         "project", "promote", "proxy",
         "prompt-size",
         "send", "sessions", "setup",
@@ -12644,6 +12644,13 @@ def main():
     from hermes_cli.promote import register_promote_subparser
 
     register_promote_subparser(subparsers)
+
+    # =========================================================================
+    # owner command — inspect/transfer the single shared-brain owner (C1)
+    # =========================================================================
+    from hermes_cli.owner import register_owner_subparser
+
+    register_owner_subparser(subparsers)
 
     # =========================================================================
     # login command  (parser built in hermes_cli/subcommands/login.py)

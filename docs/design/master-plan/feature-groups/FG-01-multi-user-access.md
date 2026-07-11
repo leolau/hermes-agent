@@ -68,11 +68,11 @@ Principals/identities live in **prod** (auth is prod). RLS policies mirrored to
 Tests green (incl. negative access + RLS) + baseline green + `ruff`/`ty` clean; **ECS system test green**; C1/C2 documented as typed interfaces; ownership-transfer E2E works.
 
 ## Progress checklist
-- [ ] Principal/role model + GoTrue integration (C1)
-- [ ] Visibility columns + `can_read`/`scope_filter` + RLS policies (C2)
-- [ ] Enrolment via pairing → principal
-- [ ] `hermes owner transfer` (approval + single-owner invariant)
-- [ ] tests (unit + negative access + RLS + E2E) green
+- [x] Principal/role model + GoTrue integration (C1)
+- [x] Visibility columns + `can_read`/`scope_filter` + RLS policies (C2)
+- [x] Enrolment via pairing → principal
+- [x] `hermes owner transfer` (approval + single-owner invariant)
+- [x] tests (unit + negative access + RLS + E2E) green
 - [ ] System test on the system-test ECS passed (see *System testing* section)
 
 ## Audit log
@@ -80,6 +80,7 @@ Tests green (incl. negative access + RLS) + baseline green + `ruff`/`ty` clean; 
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
 | 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
+| 2026-07-11 | 3 | devin:a4e646c3 | Implemented C1 (`Principal`/roles + `resolve_principal` seam + pairing enrolment, GoTrue-subject-backed principals) and C2 (`shared`/`private:<user>` visibility + `can_read`/`scope_filter` app filter + Postgres RLS) in `hermes_cli/access.py`; approval-gated `hermes owner transfer` (single-owner invariant + C5 change-event) in `hermes_cli/owner.py` + `transfer-ownership` skill; unit + throwaway-Postgres E2E incl. negative-access + direct-RLS tests. Consumes FG-13 C3 `get_store`. | FG-01 C1+C2 delivery; DB-enforced access boundary over the single shared brain |
 
 ## Cloud-agent prompt
 > **[Wave 0 — start after FG-13 C3 merges]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-01`). Implement the **multi-user access model over the single shared brain** (NOT multi-tenant profiles): principal/role model `{owner, admin, member, viewer}` (contract C1) backed by self-hosted **Supabase GoTrue**, a `resolve_principal(SessionSource)` gateway seam reusing `gateway/pairing.py` + `gateway/authz_mixin.py`; three-tier visibility `shared | private:<user> | owner-sees-all` (contract C2) with helpers `can_read`/`scope_filter` enforced by **Postgres RLS**; and an approval-gated `hermes owner transfer` keeping the **exactly-one-owner** invariant, emitting a change-event (C5). Do NOT create per-user profiles — one `HERMES_HOME`. Follow `AGENTS.md` (footprint ladder, no new core tools, `.env` = secrets only). Add unit + **negative access tests** + RLS enforcement test + E2E, all against a temp `HERMES_HOME` + throwaway Postgres schema; keep `tests/plan_baseline/` green; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.
