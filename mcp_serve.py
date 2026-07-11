@@ -38,7 +38,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, cast, Dict, List, Optional
 
 if TYPE_CHECKING:
     from hermes_cli.datastore import StoreMode
@@ -161,6 +161,17 @@ def _get_memory_store():
     from plugins.memory.supabase_pgvector.store import PgvectorMemoryStore
 
     return PgvectorMemoryStore(_get_app_store())
+
+
+def _get_goal_management_service():
+    """Return the shared FG-09 service for the configured MCP mode."""
+    from hermes_cli.goal_management import GoalManagementService
+
+    return GoalManagementService(
+        _get_app_store(),
+        audit_store=_get_app_store("prod"),
+        approval_callback=_get_write_approval_callback(),
+    )
 
 
 def _get_write_approval_callback():
@@ -1096,6 +1107,148 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
         except Exception as e:
             return json.dumps({"error": f"memory write failed: {e}"})
         return json.dumps({"written": record.as_dict()}, indent=2)
+
+    # -- goals_manage / goal_context (FG-09) -------------------------------
+
+    @mcp.tool()
+    async def goals_manage(
+        action: str,
+        goal_id: Optional[str] = None,
+        title: Optional[str] = None,
+        description: str = "",
+        priority: str = "medium",
+        visibility: Optional[str] = None,
+        status: Optional[str] = None,
+        resource_kind: Optional[str] = None,
+        resource_ref: Optional[str] = None,
+        task_id: Optional[str] = None,
+        state: Optional[str] = None,
+        metric_name: Optional[str] = None,
+        value: Optional[float] = None,
+        note: str = "",
+    ) -> str:
+        """List, create, prioritise, link, advance, or close durable goals.
+
+        All actions use the same C2-scoped/C3-routed FG-09 service as channels,
+        Telegram, and the web app. Mutations require a non-viewer principal and
+        are attributed to the authenticated MCP principal.
+        """
+        from hermes_cli.goal_management import RESOURCE_KINDS, ResourceKind
+
+        principal = await _resolve_mcp_principal()
+        normalized = action.strip().lower()
+        try:
+            service = _get_goal_management_service()
+            await service.initialize()
+            if normalized == "list":
+                goals = await service.list_goals(principal, status=status)
+                return json.dumps(
+                    {
+                        "principal": principal.user_id,
+                        "goals": [goal.as_dict() for goal in goals],
+                    },
+                    indent=2,
+                )
+            if normalized == "create":
+                if not title:
+                    raise ValueError("create requires title")
+                goal = await service.create_goal(
+                    principal,
+                    title,
+                    description=description,
+                    priority=priority,
+                    visibility=visibility,
+                    surface="mcp",
+                )
+                return json.dumps({"goal": goal.as_dict()}, indent=2)
+            if normalized in {"priority", "prioritise", "prioritize"}:
+                if not goal_id:
+                    raise ValueError("prioritise requires goal_id")
+                goal = await service.prioritise(
+                    principal,
+                    goal_id,
+                    priority,
+                    surface="mcp",
+                )
+                return json.dumps({"goal": goal.as_dict()}, indent=2)
+            if normalized == "link":
+                if (
+                    not goal_id
+                    or not resource_kind
+                    or not resource_ref
+                    or resource_kind not in RESOURCE_KINDS
+                ):
+                    raise ValueError(
+                        "link requires goal_id, resource_kind "
+                        "(memory|task|tool), and resource_ref"
+                    )
+                link = await service.link(
+                    principal,
+                    goal_id,
+                    cast(ResourceKind, resource_kind),
+                    resource_ref,
+                    surface="mcp",
+                )
+                return json.dumps({"link": link.as_dict()}, indent=2)
+            if normalized == "advance":
+                if not goal_id:
+                    raise ValueError("advance requires goal_id")
+                if task_id and state:
+                    task = await service.advance_task(
+                        principal,
+                        goal_id,
+                        task_id,
+                        state,
+                        surface="mcp",
+                    )
+                    return json.dumps({"task": task.as_dict()}, indent=2)
+                if metric_name and value is not None:
+                    metric = await service.advance_metric(
+                        principal,
+                        goal_id,
+                        metric_name,
+                        value,
+                        note=note,
+                        surface="mcp",
+                    )
+                    return json.dumps({"metric": metric.to_dict()}, indent=2)
+                if note.strip():
+                    await service.record_progress(
+                        principal,
+                        goal_id,
+                        note,
+                        surface="mcp",
+                    )
+                    return json.dumps({"advanced": True, "goal_id": goal_id})
+                raise ValueError(
+                    "advance requires task_id+state, metric_name+value, or note"
+                )
+            if normalized in {"close", "done"}:
+                if not goal_id:
+                    raise ValueError("close requires goal_id")
+                goal = await service.close_goal(
+                    principal,
+                    goal_id,
+                    surface="mcp",
+                )
+                return json.dumps({"goal": goal.as_dict()}, indent=2)
+            raise ValueError(
+                "action must be list, create, prioritise, link, advance, or close"
+            )
+        except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as e:
+            return json.dumps({"error": str(e)})
+
+    @mcp.tool()
+    async def goal_context(goal_id: str) -> str:
+        """Return cache-safe goal context as an appended MCP tool result."""
+        principal = await _resolve_mcp_principal()
+        try:
+            service = _get_goal_management_service()
+            await service.initialize()
+            context = await service.assemble_context(principal, goal_id)
+        except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as e:
+            return json.dumps({"error": str(e)})
+        return context.as_tool_result()
 
     return mcp
 

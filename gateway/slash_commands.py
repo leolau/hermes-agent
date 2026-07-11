@@ -2260,6 +2260,44 @@ class GatewaySlashCommandsMixin:
             return f"{base}\n(Couldn't draft a contract — running as a free-form goal.)"
         return base
 
+    async def _handle_goals_command(self, event: "MessageEvent") -> str:
+        """Handle durable FG-09 goal management without changing /goal."""
+        from hermes_cli.access import PrincipalStore
+        from hermes_cli.config import load_config
+        from hermes_cli.datastore import get_store
+        from hermes_cli.goal_management import GoalManagementService
+        from hermes_cli.goal_management_commands import execute_goal_command
+
+        source = event.source
+        if source is None:
+            return "Goal management is unavailable without a channel identity."
+        config = load_config() or {}
+        store = get_store("supabase-app", None, source=source, config=config)
+        principals = PrincipalStore(store)
+        principal = None
+        if source.internal_user_id:
+            principal = await principals.get(source.internal_user_id)
+        if principal is None and source.user_id:
+            principal = await principals.resolve_by_channel(
+                source.platform.value,
+                source.user_id,
+            )
+        if principal is None:
+            return "This channel identity is not enrolled for goal management."
+
+        service = GoalManagementService(
+            store,
+            audit_store=get_store("supabase-app", "prod", config=config),
+        )
+        await service.initialize()
+        surface = "telegram" if source.platform == Platform.TELEGRAM else "channel"
+        return await execute_goal_command(
+            service,
+            principal,
+            (event.get_command_args() or "").strip(),
+            surface=surface,
+        )
+
     async def _handle_subgoal_command(self, event: "MessageEvent") -> str:
         """Handle /subgoal for gateway platforms (mirror of CLI handler).
 

@@ -38,7 +38,7 @@ import zipfile
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, cast, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -74,6 +74,7 @@ from hermes_cli.memory_providers import (
     ProviderField,
     get_memory_provider,
 )
+from hermes_cli.goal_management import RESOURCE_KINDS, ResourceKind
 from gateway.status import (
     derive_gateway_busy,
     derive_gateway_drainable,
@@ -3180,35 +3181,205 @@ async def comms_answer_notification(notification_id: str, request: Request):
 
 @app.get("/api/comms/goals")
 async def comms_list_goals(request: Request):
-    """List goals the principal may read (FG-04 registry, C2-scoped)."""
-    from hermes_cli.goal_registry import GoalRegistryStore
+    """List goals the principal may read through the shared FG-09 service."""
 
     try:
         principal = await _comms_resolve_principal(request, allow_as=True)
     except _CommsNotConfigured:
         return _comms_unconfigured_payload("goals")
     status = request.query_params.get("status") or None
-    registry = GoalRegistryStore(_comms_app_store())
     try:
-        await registry.initialize()
-        goals = await registry.list_goals(principal, status=status)
+        service = await _comms_goal_service()
+        goals = await service.list_goals(principal, status=status)
     except RuntimeError:
         return _comms_unconfigured_payload("goals")
     return {
         "configured": True,
         "principal": principal.user_id,
-        "goals": [
-            {
-                "id": g.id,
-                "title": g.title,
-                "description": g.description,
-                "priority": g.priority,
-                "status": g.status,
-                "visibility": g.visibility,
-                "owner_user_id": g.owner_user_id,
-            }
-            for g in goals
-        ],
+        "goals": [goal.as_dict() for goal in goals],
+    }
+
+
+class CommsGoalCreate(BaseModel):
+    title: str
+    description: str = ""
+    priority: str = "medium"
+    visibility: Optional[str] = None
+
+
+class CommsGoalPriority(BaseModel):
+    priority: str
+
+
+class CommsGoalLink(BaseModel):
+    resource_kind: str
+    resource_ref: str
+
+
+class CommsGoalAdvance(BaseModel):
+    target: str = "note"
+    task_id: Optional[str] = None
+    state: Optional[str] = None
+    metric_name: Optional[str] = None
+    value: Optional[float] = None
+    note: str = ""
+
+
+async def _comms_goal_service():
+    from hermes_cli.goal_management import GoalManagementService
+
+    service = GoalManagementService(
+        _comms_app_store(),
+        audit_store=_comms_app_store(),
+    )
+    await service.initialize()
+    return service
+
+
+def _comms_goal_error(exc: Exception) -> "HTTPException":
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, LookupError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, (KeyError, ValueError)):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/api/comms/goals")
+async def comms_create_goal(body: CommsGoalCreate, request: Request):
+    principal = await _comms_resolve_principal(request)
+    try:
+        service = await _comms_goal_service()
+        goal = await service.create_goal(
+            principal,
+            body.title,
+            description=body.description,
+            priority=body.priority,
+            visibility=body.visibility,
+            surface="web",
+        )
+    except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise _comms_goal_error(exc)
+    return {"ok": True, "goal": goal.as_dict()}
+
+
+@app.put("/api/comms/goals/{goal_id}/priority")
+async def comms_prioritise_goal(
+    goal_id: str,
+    body: CommsGoalPriority,
+    request: Request,
+):
+    principal = await _comms_resolve_principal(request)
+    try:
+        service = await _comms_goal_service()
+        goal = await service.prioritise(
+            principal,
+            goal_id,
+            body.priority,
+            surface="web",
+        )
+    except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise _comms_goal_error(exc)
+    return {"ok": True, "goal": goal.as_dict()}
+
+
+@app.post("/api/comms/goals/{goal_id}/links")
+async def comms_link_goal(
+    goal_id: str,
+    body: CommsGoalLink,
+    request: Request,
+):
+    principal = await _comms_resolve_principal(request)
+    if body.resource_kind not in RESOURCE_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"resource_kind must be one of {', '.join(RESOURCE_KINDS)}",
+        )
+    try:
+        service = await _comms_goal_service()
+        link = await service.link(
+            principal,
+            goal_id,
+            cast(ResourceKind, body.resource_kind),
+            body.resource_ref,
+            surface="web",
+        )
+    except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise _comms_goal_error(exc)
+    return {"ok": True, "link": link.as_dict()}
+
+
+@app.post("/api/comms/goals/{goal_id}/advance")
+async def comms_advance_goal(
+    goal_id: str,
+    body: CommsGoalAdvance,
+    request: Request,
+):
+    principal = await _comms_resolve_principal(request)
+    try:
+        service = await _comms_goal_service()
+        if body.target == "task":
+            if not body.task_id or not body.state:
+                raise ValueError("task advance requires task_id and state")
+            task = await service.advance_task(
+                principal,
+                goal_id,
+                body.task_id,
+                body.state,
+                surface="web",
+            )
+            return {"ok": True, "task": task.as_dict()}
+        if body.target == "metric":
+            if not body.metric_name or body.value is None:
+                raise ValueError("metric advance requires metric_name and value")
+            metric = await service.advance_metric(
+                principal,
+                goal_id,
+                body.metric_name,
+                body.value,
+                note=body.note,
+                surface="web",
+            )
+            return {"ok": True, "metric": metric.to_dict()}
+        if body.target != "note":
+            raise ValueError("target must be task, metric, or note")
+        if not body.note.strip():
+            raise ValueError("note is required")
+        await service.record_progress(
+            principal,
+            goal_id,
+            body.note,
+            surface="web",
+        )
+        return {"ok": True}
+    except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise _comms_goal_error(exc)
+
+
+@app.post("/api/comms/goals/{goal_id}/close")
+async def comms_close_goal(goal_id: str, request: Request):
+    principal = await _comms_resolve_principal(request)
+    try:
+        service = await _comms_goal_service()
+        goal = await service.close_goal(principal, goal_id, surface="web")
+    except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise _comms_goal_error(exc)
+    return {"ok": True, "goal": goal.as_dict()}
+
+
+@app.get("/api/comms/goals/{goal_id}/context")
+async def comms_goal_context(goal_id: str, request: Request):
+    principal = await _comms_resolve_principal(request, allow_as=True)
+    try:
+        service = await _comms_goal_service()
+        context = await service.assemble_context(principal, goal_id)
+    except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise _comms_goal_error(exc)
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "context": context.as_dict(),
     }
 
 
