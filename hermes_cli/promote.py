@@ -269,7 +269,7 @@ def promote_command(args: argparse.Namespace) -> int:
         )
     except (KeyError, PermissionError, RuntimeError, ValueError) as error:
         print(f"Promotion failed: {error}", file=sys.stderr)
-        return 1
+        raise SystemExit(1) from error
 
     print(
         f"Promoted {result.artifact_kind}:{result.artifact_ref} "
