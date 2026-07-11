@@ -9126,6 +9126,255 @@ async def set_mcp_server_enabled(
     return {"ok": True, "name": name, "enabled": bool(body.enabled)}
 
 
+# ── Admin: FG-07 tool registry + in-house tool dashboard ────────────────────
+#
+# These routes front the mode-aware, C2-scoped tool registry
+# (hermes_cli.tools_registry). Access is routed through the merged contracts —
+# C3 for datastore/mode routing, C1/C2 for the operating principal + scoping,
+# C5/C6 for provenance + approval-gated promotion — never re-implemented here.
+# When the Supabase application datastore isn't configured the routes degrade
+# to ``{"configured": false}`` so the dashboard renders a setup hint instead of
+# 500ing.
+
+
+class ToolEnabledToggle(BaseModel):
+    enabled: bool
+    mode: Optional[str] = None
+
+
+class ToolConfigUpdate(BaseModel):
+    config: Dict[str, Any] = {}
+    mode: Optional[str] = None
+
+
+class ToolPromoteRequest(BaseModel):
+    mode: Optional[str] = None
+
+
+async def _resolve_tool_operator(prod_store):
+    """Resolve the dashboard operator principal (the enrolled owner)."""
+    from hermes_cli.access import PrincipalStore
+
+    owner = await PrincipalStore(prod_store).get_owner()
+    if owner is None:
+        raise HTTPException(
+            status_code=409,
+            detail="No owner enrolled yet — run `hermes owner` to enrol one.",
+        )
+    return owner
+
+
+def _resolve_tool_mode(mode: Optional[str]):
+    from hermes_cli.datastore import resolve_mode
+
+    return resolve_mode(mode if mode in ("dev", "prod") else None)
+
+
+@app.get("/api/tools")
+async def list_tools(mode: Optional[str] = None):
+    """List tools visible to the operator (C2-scoped) for a datastore mode."""
+    from hermes_cli.datastore import get_store
+    from hermes_cli.tools_registry import ToolRegistry
+
+    resolved_mode = _resolve_tool_mode(mode)
+    try:
+        prod_store = get_store("supabase-app", "prod")
+        operator = await _resolve_tool_operator(prod_store)
+        registry = ToolRegistry(get_store("supabase-app", resolved_mode))
+        await registry.initialize()
+        tools = await registry.list_for_principal(operator)
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        # No Supabase DSN configured — degrade gracefully.
+        return {"configured": False, "mode": resolved_mode, "tools": [], "detail": str(exc)}
+    return {
+        "configured": True,
+        "mode": resolved_mode,
+        "tools": [t.as_dict() for t in tools],
+    }
+
+
+@app.put("/api/tools/{name}/enabled")
+async def set_tool_enabled(name: str, body: ToolEnabledToggle):
+    """Enable/disable a tool (owner or owning principal); records C5 provenance."""
+    from hermes_cli.datastore import get_store
+    from hermes_cli.tool_cmd import _record_provenance
+    from hermes_cli.tools_registry import ToolRegistry
+
+    resolved_mode = _resolve_tool_mode(body.mode)
+    try:
+        prod_store = get_store("supabase-app", "prod")
+        operator = await _resolve_tool_operator(prod_store)
+        registry = ToolRegistry(get_store("supabase-app", resolved_mode))
+        await registry.initialize()
+        tool = await registry.set_enabled(operator, name, bool(body.enabled))
+        await _record_provenance(
+            prod_store,
+            actor_user_id=operator.user_id,
+            action=f"hermes tool {'enable' if body.enabled else 'disable'} {name}",
+            target_ref=name,
+            mode=tool.mode,
+            visibility=tool.visibility,
+            payload={"status": tool.status},
+        )
+    except HTTPException:
+        raise
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Tool '{name}' not found")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return tool.as_dict()
+
+
+@app.put("/api/tools/{name}/config")
+async def set_tool_config(name: str, body: ToolConfigUpdate):
+    """Replace a tool's config_json (validated: no HERMES_* non-secret keys)."""
+    from hermes_cli.datastore import get_store
+    from hermes_cli.tool_cmd import _record_provenance
+    from hermes_cli.tools_registry import ToolConfigError, ToolRegistry
+
+    resolved_mode = _resolve_tool_mode(body.mode)
+    try:
+        prod_store = get_store("supabase-app", "prod")
+        operator = await _resolve_tool_operator(prod_store)
+        registry = ToolRegistry(get_store("supabase-app", resolved_mode))
+        await registry.initialize()
+        tool = await registry.set_config(operator, name, body.config)
+        await _record_provenance(
+            prod_store,
+            actor_user_id=operator.user_id,
+            action=f"hermes tool config {name}",
+            target_ref=name,
+            mode=tool.mode,
+            visibility=tool.visibility,
+            payload={"config_json": tool.config_json},
+        )
+    except HTTPException:
+        raise
+    except ToolConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Tool '{name}' not found")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return tool.as_dict()
+
+
+@app.post("/api/tools/{name}/promote")
+async def promote_tool_route(name: str, body: ToolPromoteRequest):
+    """Approval-gated (C6) dev→prod promotion. The explicit POST is the approval."""
+    from hermes_cli.datastore import get_store
+    from hermes_cli.tools_registry import promote_tool
+
+    try:
+        prod_store = get_store("supabase-app", "prod")
+        operator = await _resolve_tool_operator(prod_store)
+        result = await promote_tool(
+            get_store("supabase-app", "prod"),
+            name,
+            actor=operator.user_id,
+            approved=True,
+        )
+    except HTTPException:
+        raise
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Dev tool '{name}' not found")
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {
+        "ok": True,
+        "tool_name": result.tool_name,
+        "approval_ref": result.approval_ref,
+        "change_ref": result.change_ref,
+        "promotion_ref": result.promotion_ref,
+    }
+
+
+@app.get("/api/tools/{name}/health")
+async def tool_health(name: str, mode: Optional[str] = None):
+    """Best-effort health probe for a tool's own web process."""
+    from hermes_cli.datastore import get_store
+    from hermes_cli.tools_registry import ToolRegistry
+
+    resolved_mode = _resolve_tool_mode(mode)
+    try:
+        prod_store = get_store("supabase-app", "prod")
+        operator = await _resolve_tool_operator(prod_store)
+        registry = ToolRegistry(get_store("supabase-app", resolved_mode))
+        await registry.initialize()
+        tools = {t.name: t for t in await registry.list_for_principal(operator)}
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    tool = tools.get(name)
+    if tool is None:
+        raise HTTPException(status_code=404, detail=f"Tool '{name}' not found")
+    web_url = tool.web_url
+    if not web_url:
+        return {"name": name, "reachable": False, "detail": "no web_url"}
+
+    def _probe() -> tuple[bool, str]:
+        import urllib.error
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(web_url, timeout=2) as resp:  # noqa: S310
+                return True, f"HTTP {resp.status}"
+        except urllib.error.HTTPError as exc:
+            # A response (even 4xx/5xx) means the process is up.
+            return True, f"HTTP {exc.code}"
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+
+    reachable, detail = await asyncio.to_thread(_probe)
+    return {"name": name, "reachable": reachable, "detail": detail, "web_url": tool.web_url}
+
+
+@app.get("/api/tools/changes")
+async def list_tool_changes(mode: Optional[str] = None, limit: int = 50):
+    """Render the C5/FG-12 change log entries visible to the operator (C2)."""
+    from hermes_cli.changes import ChangeLog, initialize_changes
+    from hermes_cli.datastore import get_store
+
+    try:
+        prod_store = get_store("supabase-app", "prod")
+        operator = await _resolve_tool_operator(prod_store)
+        connection = await prod_store.connect()
+        try:
+            await initialize_changes(connection)
+        finally:
+            await connection.close()
+        changes = await ChangeLog(prod_store).list_changes(operator, limit=limit)
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        return {"configured": False, "changes": [], "detail": str(exc)}
+    return {
+        "configured": True,
+        "changes": [
+            {
+                "id": c.id,
+                "actor_user_id": c.actor_user_id,
+                "mode": c.mode,
+                "target_kind": c.target_kind,
+                "reversible": c.reversible,
+                "visibility": c.visibility,
+                "undone": c.undone,
+                "payload": c.payload,
+            }
+            for c in changes
+        ],
+    }
+
+
 @app.get("/api/mcp/catalog")
 async def list_mcp_catalog(profile: Optional[str] = None):
     """Browse the Nous-approved MCP catalog (the optional-mcps/ manifests).
