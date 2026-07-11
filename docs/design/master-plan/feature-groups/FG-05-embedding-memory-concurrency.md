@@ -1,6 +1,6 @@
 # FG-05 — Embedding memory with concurrency
 
-**Wave:** 0 (foundation) · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** 0 (foundation) · **Owner agent:** devin:21e6f504 · **Status:** In review (PR into `develop`, stacked on #9 + #12)
 
 ## Summary
 Add **semantic (embedding) memory** with **safe concurrent access** across many
@@ -64,18 +64,19 @@ profile-scoped as today.
 Tests green (incl. concurrency + negative access + cache-safety) + baseline green + `ruff`/`ty` clean; pgvector provider registered via the memory-provider ABC; curated snapshot semantics untouched; **ECS system test green**.
 
 ## Progress checklist
-- [ ] Supabase/pgvector memory provider (via existing ABC)
-- [ ] `memory_query`/`memory_write` tool (appended-result, cache-safe)
-- [ ] visibility scoping + RLS
-- [ ] concurrency + negative-access + cache-safety tests
-- [ ] curated-tier snapshot untouched (regression check)
-- [ ] System test on the system-test ECS passed (see *System testing* section)
+- [x] Supabase/pgvector memory provider (via existing ABC) — `plugins/memory/supabase_pgvector/`
+- [x] `memory_query`/`memory_write` tool (appended-result, cache-safe) — service-gated on a configured C3 DSN
+- [x] visibility scoping + RLS — reuses C2 `scope_filter` / `apply_scope_rls`; each row carries `owner_user_id` + `visibility`
+- [x] concurrency + negative-access + cache-safety tests — `tests/plugins/memory/test_supabase_pgvector_{unit,e2e}.py`
+- [x] curated-tier snapshot untouched (regression check) — `tools/memory_tool.py` unchanged; live tier is a separate provider
+- [ ] System test on the system-test ECS passed (see *System testing* section) — **pending owner (Leo) coordination**; not accessible from PR CI
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
 | 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
+| 2026-07-11 | 3 | devin:21e6f504 | Implemented the D2 live tier: `supabase_pgvector` memory provider (`memory_query`/`memory_write`), C2-scoped + RLS, C3-routed via `get_store("supabase-app", mode)`, with unit/cache-safety + throwaway-Postgres E2E (roundtrip, semantic recall, concurrency, negative-access). Curated snapshot untouched. PR into `develop`, stacked on #9 + #12. | FG-05 development; ECS system test still pending owner coordination |
 
 ## Cloud-agent prompt
 > **[Wave 0 — start after FG-13 C3 + FG-01 C2 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-05`). Implement **hybrid embedding memory with concurrency** (finalising the open memory-consistency decision in `docs/design/AGENT-HANDOFF.md §3`): keep `tools/memory_tool.py`'s frozen `MEMORY.md`/`USER.md` snapshot as the cache-safe curated tier (DO NOT break its snapshot semantics); add a **live tier** = a Supabase **Postgres + pgvector** memory provider registered through the existing `plugins/memory/*` ABC, exposed via `memory_query`/`memory_write` tools whose results are **appended messages** (never injected into the system prompt — prove cache-safety with a test). Scope every memory row with `owner_user_id` + `visibility` (contract C2) enforced by RLS; owner sees all. Use Postgres MVCC for concurrent `(user,task)` cores. Follow `AGENTS.md` (footprint ladder, cache-sacred, no core-tool growth). Add unit + **concurrency** + **negative-access** + **cache-safety** tests against temp `HERMES_HOME` + throwaway Postgres schema; keep `tests/plan_baseline/` green; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.
