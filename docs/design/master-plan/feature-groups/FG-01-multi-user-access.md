@@ -52,13 +52,20 @@ Principals/identities live in **prod** (auth is prod). RLS policies mirrored to
 - E2E: enrol via pairing → member; owner transfer end-to-end (approval + change-event + single-owner invariant holds).
 - RLS enforcement test hitting Postgres directly (not just app-layer).
 
+## System testing (existing ECS)
+**Required step after this FG's development completes** (part of its Definition of Done), on top of the per-PR unit/E2E + baseline gate: deploy this FG to the existing ai-prentice ECS (`i-j6camnt3ocwlmzajthil`, 2/4, cn-hongkong) — the dedicated **system-test host** — and exercise it end-to-end on the real stack against a **staging** Supabase schema (`app_staging`) + staging SQLite core (**never prod**). See README §7.1. Acceptance checklist:
+- Enrol ≥3 real test users via pairing on the deployed box; confirm roles (owner/admin/member/viewer) resolve through the live gateway.
+- Against **real Postgres RLS + GoTrue**: member A cannot read `private:B`; shared org knowledge readable by all; owner sees everything.
+- Ownership transfer end-to-end on the box: exactly-one-owner invariant holds; change-event recorded.
+- **Gate:** this FG is not complete/promotable until this ECS checklist passes (on top of the per-PR gate).
+
 ## Dependencies
 - **Blocked by:** FG-13 (C3 datastore router) for the Supabase app store.
 - **Blocks:** FG-02, FG-05 (scoping), FG-07, FG-09, FG-10, FG-11 (auth), FG-12 (actor).
 - Publishes contracts **C1, C2**.
 
 ## Definition of Done
-Tests green (incl. negative access + RLS) + baseline green + `ruff`/`ty` clean; C1/C2 documented as typed interfaces; ownership-transfer E2E works.
+Tests green (incl. negative access + RLS) + baseline green + `ruff`/`ty` clean; **ECS system test green**; C1/C2 documented as typed interfaces; ownership-transfer E2E works.
 
 ## Progress checklist
 - [ ] Principal/role model + GoTrue integration (C1)
@@ -66,11 +73,13 @@ Tests green (incl. negative access + RLS) + baseline green + `ruff`/`ty` clean; 
 - [ ] Enrolment via pairing → principal
 - [ ] `hermes owner transfer` (approval + single-owner invariant)
 - [ ] tests (unit + negative access + RLS + E2E) green
+- [ ] System test on existing ECS passed (see *System testing* section)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
+| 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (existing ECS) section as a per-FG DoD step | Leo: existing ECS = system-test host, run after each FG's development |
 
 ## Cloud-agent prompt
-> **[Wave 0 — start after FG-13 C3 merges]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-01`). Implement the **multi-user access model over the single shared brain** (NOT multi-tenant profiles): principal/role model `{owner, admin, member, viewer}` (contract C1) backed by self-hosted **Supabase GoTrue**, a `resolve_principal(SessionSource)` gateway seam reusing `gateway/pairing.py` + `gateway/authz_mixin.py`; three-tier visibility `shared | private:<user> | owner-sees-all` (contract C2) with helpers `can_read`/`scope_filter` enforced by **Postgres RLS**; and an approval-gated `hermes owner transfer` keeping the **exactly-one-owner** invariant, emitting a change-event (C5). Do NOT create per-user profiles — one `HERMES_HOME`. Follow `AGENTS.md` (footprint ladder, no new core tools, `.env` = secrets only). Add unit + **negative access tests** + RLS enforcement test + E2E, all against a temp `HERMES_HOME` + throwaway Postgres schema; keep `tests/plan_baseline/` green; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc.
+> **[Wave 0 — start after FG-13 C3 merges]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-01`). Implement the **multi-user access model over the single shared brain** (NOT multi-tenant profiles): principal/role model `{owner, admin, member, viewer}` (contract C1) backed by self-hosted **Supabase GoTrue**, a `resolve_principal(SessionSource)` gateway seam reusing `gateway/pairing.py` + `gateway/authz_mixin.py`; three-tier visibility `shared | private:<user> | owner-sees-all` (contract C2) with helpers `can_read`/`scope_filter` enforced by **Postgres RLS**; and an approval-gated `hermes owner transfer` keeping the **exactly-one-owner** invariant, emitting a change-event (C5). Do NOT create per-user profiles — one `HERMES_HOME`. Follow `AGENTS.md` (footprint ladder, no new core tools, `.env` = secrets only). Add unit + **negative access tests** + RLS enforcement test + E2E, all against a temp `HERMES_HOME` + throwaway Postgres schema; keep `tests/plan_baseline/` green; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (existing ECS)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.

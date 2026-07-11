@@ -200,6 +200,46 @@ hermetic `HERMES_HOME`, CI: `tests.yml` / `typecheck.yml` (ty) / `lint.yml`
 
 Run: `scripts/run_tests.sh tests/plan_baseline/` (fast) and the FG's own path.
 
+### 7.1 System testing environment (existing ECS)
+
+There are **three** distinct places tests run — keep them separate:
+
+| Layer | Where it runs | When | Data |
+|-------|---------------|------|------|
+| Baseline + per-FG unit/E2E | each Devin agent's VM + **CI** (per PR) | continuously, during development | temp `HERMES_HOME` + **throwaway** Postgres schema |
+| **System / integration testing** | **the existing ai-prentice ECS** (`i-j6camnt3ocwlmzajthil`, 2 vCPU/4 GB, cn-hongkong) as the dedicated **system-test host** | **after EACH feature group's development completes** (a required step in that FG's Definition of Done) | **staging** Supabase schema (`app_staging`) + a staging SQLite core on the box — **never prod** |
+| Production | the new ECS (`ecs.e-c1m4.xlarge`, 4/16, per D8) | after an FG's system test passes and it is promoted | prod Supabase + prod `state.db` |
+
+**Why the existing box:** per Leo, the current 2/4 ai-prentice ECS is the shared
+**system-test host** — it is **not** a development box. Every feature group,
+once its code is developed and its per-PR unit/E2E + baseline gate is green, is
+deployed to this ECS and exercised **end-to-end on the real stack** before that
+FG is considered done. Production is the *new* box.
+
+**How the per-FG system test works (repeated for every FG):**
+1. The FG's PR passes CI (baseline + its own unit/E2E, `ruff`/`ty`).
+2. The FG is deployed to the existing ECS in **staging mode** (`mode=dev`/
+   `staging` via contract C3; `app_staging` Supabase schema + staging SQLite
+   core) on top of the already-merged FGs.
+3. Run **this FG's "System testing (existing ECS)" acceptance checklist** (see
+   its FG doc) against the real deployed stack — real GoTrue/RLS, real pgvector,
+   real channel adapters bound to **test** accounts, real Telegram + web app,
+   real MCP endpoints.
+4. **Definition-of-Done gate:** the FG is not complete/promotable until its ECS
+   system-test checklist is green (on top of the per-PR gate). Only then is it
+   promoted to production on the new box.
+
+**Ordering note:** because each FG's system test runs on the *cumulative*
+deployed stack, an FG whose live behaviour depends on a not-yet-merged FG
+verifies what it can in isolation and re-runs the cross-FG checks once its
+dependency lands (see each FG's *Dependencies*). Cross-surface end-to-end
+coverage is owned by **FG-09**.
+
+**Resource caveat:** the full self-hosted Supabase bundle + Node tools on the
+2/4 box is tight; run each FG's system test **sequentially** (not all channels/
+tools hot at once), or temporarily in-place-resize the system-test box for the
+pass (same-family resize, ~5 min, no data migration — D8).
+
 ---
 
 ## 8. Risks / open items carried into implementation
@@ -221,3 +261,4 @@ Run: `scripts/run_tests.sh tests/plan_baseline/` (fast) and the FG's own path.
 | Date | Edition | Author | Scope | Change | Rationale |
 |------|---------|--------|-------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 (for Leo) | all | Initial master plan + 13 FG docs + baseline tests | Kickoff of the 13-FG build-out; decisions D1–D9 locked in planning session |
+| 2026-07-11 | 2 | devin:8cec0d47 (for Leo) | testing | Added §7.1 + a "System testing (existing ECS)" section to every FG doc, as a required Definition-of-Done step after each FG's development | Leo: use the existing ai-prentice ECS as the system-test host, exercised after every feature group's development (per-FG, not a single post-all-waves pass) |

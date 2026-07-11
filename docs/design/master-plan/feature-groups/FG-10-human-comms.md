@@ -39,24 +39,32 @@ authoring (C3). Consent/quiet-hours prefs in `app_*` per principal.
 - E2E: pending approval appears in Telegram + web; responding in one clears the other; a proactive ask respects quiet-hours.
 - Baseline green.
 
+## System testing (existing ECS)
+**Required step after this FG's development completes** (part of its Definition of Done), on top of the per-PR unit/E2E + baseline gate: deploy this FG to the existing ai-prentice ECS (`i-j6camnt3ocwlmzajthil`, 2/4, cn-hongkong) — the dedicated **system-test host** — and exercise it end-to-end on the real stack against a **staging** Supabase schema (`app_staging`) + staging SQLite core (**never prod**). See README §7.1. Acceptance checklist:
+- On the deployed box: a pending approval appears in **real Telegram + the web app**; responding in one clears it in the other; a proactive ask respects quiet-hours (C6).
+- Each principal sees only **scope-filtered** (C2) goals/tasks/memory in both surfaces; owner sees all.
+- **Gate:** this FG is not complete/promotable until this ECS checklist passes (on top of the per-PR gate).
+
 ## Dependencies
 - **Blocked by:** FG-01 (C1/C2), FG-12 (C6 + change log), FG-03 (`account_id` routing).
 - **Blocks:** FG-09 (human surface for goal mgmt).
 - Co-publishes **C6** with FG-12.
 
 ## Definition of Done
-Tests green + baseline green + `ruff`/`ty` + web lint/typecheck clean; Telegram + web parity for messaging/approvals/change-review; C6 enforced; cache-safe; `data-component` applied.
+Tests green + baseline green + `ruff`/`ty` + web lint/typecheck clean; Telegram + web parity for messaging/approvals/change-review; C6 enforced; cache-safe; `data-component` applied; **ECS system test green**.
 
 ## Progress checklist
 - [ ] Principal-aware messaging + reply routing (account_id)
 - [ ] Web app: chat, scoped goals/tasks/memory, approvals, change review
 - [ ] C6 quiet-hours/rate-limit/consent enforcement + dedupe across surfaces
 - [ ] tests (unit + negative + E2E) green
+- [ ] System test on existing ECS passed (see *System testing* section)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
+| 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (existing ECS) section as a per-FG DoD step | Leo: existing ECS = system-test host, run after each FG's development |
 
 ## Cloud-agent prompt
-> **[Wave 2 — start after FG-01 + FG-12 + FG-03 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-10`). Deliver **human comms parity across Telegram + web app** for the multi-user world: resolve every human message to a `Principal` (contract C1) and route replies to the correct channel/account (FG-03 `account_id`); extend the `web/` app (`hermes_cli/web_server.py`) so users can chat, view **scope-filtered** (contract C2) goals/tasks/memory, approve/deny pending actions, and review + undo/redo changes (FG-12) and manage tools (FG-07). All approvals + proactive asks (4.1/6.1) ride the shared **quiet-hours/rate-limit/consent policy (contract C6, co-owned with FG-12)** and are delivered as **appended messages** (never system-prompt mutations); de-duplicate a pending item across Telegram + web (answering one clears the other). New web components carry `data-component="ComponentName"`. Follow `AGENTS.md` (cache-sacred, footprint ladder, config not env). Add unit + negative-access + E2E tests + web lint/typecheck; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc.
+> **[Wave 2 — start after FG-01 + FG-12 + FG-03 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-10`). Deliver **human comms parity across Telegram + web app** for the multi-user world: resolve every human message to a `Principal` (contract C1) and route replies to the correct channel/account (FG-03 `account_id`); extend the `web/` app (`hermes_cli/web_server.py`) so users can chat, view **scope-filtered** (contract C2) goals/tasks/memory, approve/deny pending actions, and review + undo/redo changes (FG-12) and manage tools (FG-07). All approvals + proactive asks (4.1/6.1) ride the shared **quiet-hours/rate-limit/consent policy (contract C6, co-owned with FG-12)** and are delivered as **appended messages** (never system-prompt mutations); de-duplicate a pending item across Telegram + web (answering one clears the other). New web components carry `data-component="ComponentName"`. Follow `AGENTS.md` (cache-sacred, footprint ladder, config not env). Add unit + negative-access + E2E tests + web lint/typecheck; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (existing ECS)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.
