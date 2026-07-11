@@ -6,8 +6,9 @@ One prompt per feature group. **Launch order = waves** (see
 
 - **Wave 0 (foundations, merge first):** FG-13, FG-01, FG-05
 - **Wave 1:** FG-03, FG-04, FG-06, FG-11, FG-12
-- **Wave 2:** FG-07, FG-08, FG-10, FG-02
+- **Wave 2:** FG-07, FG-08, FG-10
 - **Wave 3:** FG-09
+- **ON HOLD (not scheduled):** FG-02 (blockchain) — paused per Leo; do not launch until the owner resumes it. No downstream dependents.
 
 Each agent: own branch off `develop`; edit **only its own** `feature-groups/FG-XX-*.md`
 (progress checklist + audit log); keep `tests/plan_baseline/` green; add its own
@@ -18,7 +19,8 @@ prompt"** — the entries below are copies for convenience.
 
 **System testing:** an FG is not done until, after its code is developed, its
 **"System testing (system-test box)"** checklist (in its FG doc) passes on the
-existing ai-prentice ECS (the dedicated system-test host — never prod). See
+new hermes-systest ECS (`47.83.199.25`, the dedicated system-test host — never
+the prod schema). See
 [`README.md` §7.1](./README.md). Coordinate that deploy/run with Leo.
 
 ---
@@ -62,8 +64,6 @@ See [`feature-groups/FG-08-oss-copy-mcp.md`](./feature-groups/FG-08-oss-copy-mcp
 ### FG-10 — human comms (Telegram + web)
 See [`feature-groups/FG-10-human-comms.md`](./feature-groups/FG-10-human-comms.md) → *Cloud-agent prompt*.
 
-### FG-02 — blockchain DID + ERC-721
-See [`feature-groups/FG-02-blockchain-did-erc721.md`](./feature-groups/FG-02-blockchain-did-erc721.md) → *Cloud-agent prompt*.
 
 ## Wave 3
 
@@ -75,6 +75,7 @@ See [`feature-groups/FG-09-goal-management.md`](./feature-groups/FG-09-goal-mana
 ## Orchestration note (automatic launch)
 The orchestrator session can spawn these as **child sessions wave-by-wave**:
 launch Wave 0 (3 agents) → wait for their PRs to merge (contracts C1–C6 land) →
-launch Wave 1 (5 agents) → Wave 2 (4 agents) → Wave 3 (1 agent). Never launch
-all 13 at once — Waves 1–3 build on Wave-0 contracts and would collide on the
-god-files otherwise.
+launch Wave 1 (5 agents) → Wave 2 (3 agents) → Wave 3 (1 agent). Never launch
+all at once — Waves 1–3 build on Wave-0 contracts and would collide on the
+god-files otherwise. **FG-02 (blockchain) is on hold** and is not part of this
+sequence until the owner resumes it.

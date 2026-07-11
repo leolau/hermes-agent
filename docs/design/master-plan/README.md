@@ -88,7 +88,7 @@ Every FG must obey these or it will not merge:
 | FG | Title | Wave | Primary reuse anchors |
 |----|-------|------|-----------------------|
 | [01](./feature-groups/FG-01-multi-user-access.md) | Multi-users with access rights; single transferable owner | **0** | `gateway/authz_mixin.py`, `gateway/pairing.py`, `dashboard_auth/`, Supabase GoTrue + RLS |
-| [02](./feature-groups/FG-02-blockchain-did-erc721.md) | Blockchain per user: DID:ION + ERC-721 assets | 2 | `optional-skills/blockchain/evm`, MCP rung, approval gates |
+| [02](./feature-groups/FG-02-blockchain-did-erc721.md) | Blockchain per user: DID:ION + ERC-721 assets | **HOLD** | `optional-skills/blockchain/evm`, MCP rung, approval gates |
 | [03](./feature-groups/FG-03-multi-channel-redesign.md) | Multi-channel redesign (one brain, all channels) | 1 | `gateway/`, `gateway/session.py`, `custom/*`, design docs #1/#2 |
 | [04](./feature-groups/FG-04-goals-priority-measurability.md) | Goals with priority + measurability/progress | 1 | `hermes_cli/goals.py` (`GoalState`/`GoalContract`/judge) |
 | [05](./feature-groups/FG-05-embedding-memory-concurrency.md) | Embedding memory with concurrency | **0** | `tools/memory_tool.py`, `plugins/memory/*`, Supabase pgvector |
@@ -140,13 +140,21 @@ WAVE 1 (core capabilities — parallel; each owns a distinct subsystem)
 WAVE 2 (needs Wave 1 + C6 approval frozen — parallel)
   ├─ FG-07  tools creation + dashboard  (needs C3, C5, C6; web/)
   ├─ FG-08  OSS remote + in-house       (needs C6, FG-07 tool-registry, sandbox)
-  ├─ FG-10  human comms webapp parity   (needs C1, C6, web/)
-  └─ FG-02  blockchain DID + ERC-721    (needs C1, C6; plugin+MCP)
+  └─ FG-10  human comms webapp parity   (needs C1, C6, web/)
 
 WAVE 3 (integration)
   └─ FG-09  goal management = memory+tasks+tools across sources/telegram/webapp/MCP
              (needs FG-04, 05, 06, 07, 10, 11)
+
+ON HOLD (not scheduled — resume only on explicit owner go-ahead)
+  └─ FG-02  blockchain DID + ERC-721    (would be Wave 2; needs C1, C6; plugin+MCP)
 ```
+
+> **FG-02 (blockchain) is ON HOLD** per Leo (2026-07-11). It is excluded from
+> the wave schedule and will not be launched until the owner explicitly
+> resumes it. All other FGs proceed as scheduled. FG-02 has **no downstream
+> dependents** (nothing in Waves 0–3 or FG-09 depends on it), so holding it
+> does not block any other feature group.
 
 **Ordering rules for agents:**
 - An FG agent may start only when **all its "blocked-by" FGs have merged** (see
@@ -270,3 +278,4 @@ transient, and in-place-resize to 8/32 (same-family, ~5 min, no data migration
 | 2026-07-11 | 1 | devin:8cec0d47 (for Leo) | all | Initial master plan + 13 FG docs + baseline tests | Kickoff of the 13-FG build-out; decisions D1–D9 locked in planning session |
 | 2026-07-11 | 2 | devin:8cec0d47 (for Leo) | testing | Added §7.1 + a "System testing" section to every FG doc, as a required Definition-of-Done step after each FG's development | Leo: use a dedicated ai-prentice ECS as the system-test host, exercised after every feature group's development (per-FG, not a single post-all-waves pass) |
 | 2026-07-11 | 3 | devin:8cec0d47 (for Leo) | infra/testing | System-test host = a **new** 4/16 ECS (`hermes-systest`, `i-j6c81aisv2dd8mg17yle`, EIP `47.83.199.25`, 100 GB ESSD at `/opt/data`), which also hosts prod for now (`app_staging` vs `app_prod` schemas + separate SQLite cores via C3); retitled the FG section to "System testing (system-test box)" | Leo: the existing 2/4 box is too small for the new self-hosted-Supabase design; provisioned the new box and pointed system testing (and, for now, prod) at it |
+| 2026-07-11 | 4 | devin:8cec0d47 (for Leo) | scope | **FG-02 (blockchain DID + ERC-721) put ON HOLD** — removed from the Wave-2 schedule; will not be launched until the owner explicitly resumes it. All other FGs proceed. | Leo: hold the blockchain implementation but go ahead with the rest. FG-02 has no downstream dependents, so holding it blocks nothing. |

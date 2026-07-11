@@ -1,6 +1,11 @@
 # FG-02 — Blockchain per user: DID:ION + ERC-721 assets
 
-**Wave:** 2 · **Owner agent:** _unassigned_ · **Status:** Not started
+> **⏸ ON HOLD (per Leo, 2026-07-11).** This feature group is paused and excluded
+> from the wave schedule. Do **not** launch or implement it until the owner
+> explicitly resumes it. It has no downstream dependents, so holding it does not
+> block any other FG. The design below is preserved for when it resumes.
+
+**Wave:** ~~2~~ **HOLD** · **Owner agent:** _unassigned_ · **Status:** On hold
 
 ## Summary
 Give each user a **decentralised identity (DID:ION)** and let users mint an
