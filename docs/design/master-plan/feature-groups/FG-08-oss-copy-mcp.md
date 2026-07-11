@@ -1,6 +1,6 @@
 # FG-08 — Copy OSS capability + MCP (remote & in-house)
 
-**Wave:** 2 · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** 2 · **Owner agent:** devin:ab45de26 · **Status:** In review (ECS system-test pending owner coordination)
 
 ## Summary
 Based on a goal, the agent can acquire a capability from **open-source**, in one
@@ -67,18 +67,20 @@ Registry/provenance in `app_*`.
 Tests green + baseline green + `ruff`/`ty` clean; remote path follows §4.3 hard rails incl. ≥2 approvals + license allowlist; no third-party OSS vendored into the core tree; in-house path reuses FG-07; **ECS system test green**.
 
 ## Progress checklist
-- [ ] GitHub discovery + candidate presentation (approval)
-- [ ] Remote path: vet → clone off-box → run sandboxed → fastmcp wrap → register (§4.3 rails)
-- [ ] In-house path via FG-07 scaffolder
-- [ ] Provenance + commit pin + retire pass
-- [ ] tests (unit + remote E2E mocked + in-house E2E + negative) green
-- [ ] System test on the system-test ECS passed (see *System testing* section)
+- [x] GitHub discovery + candidate presentation (approval) — `oss discover`, fit ranking, license flag
+- [x] Remote path: vet → clone off-box → run sandboxed → fastmcp wrap → register (§4.3 rails)
+- [x] In-house path via FG-07 scaffolder (delegates to `scaffold_in_house_tool`)
+- [x] Provenance + commit pin + retire pass (`provenance` registry, commit-pin rail, `oss retire`)
+- [x] tests (unit + remote E2E mocked + in-house E2E + negative) green
+- [ ] System test on the system-test ECS passed (see *System testing* section) — **pending owner coordination** (no access to the ECS box from this agent)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
 | 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
+| 2026-07-11 | 3 | devin:ab45de26 | Implemented FG-08: `hermes_cli/oss_acquisition.py` (§4.3 6-stage remote pipeline + in-house delegation + license allowlist + host-runner abstraction + `fastmcp` wrapper generator), `hermes_cli/oss_provenance.py` (C2/C3 provenance registry + RLS), `hermes_cli/oss_host.py` (SSH host runner), `hermes_cli/oss_cmd.py` (`hermes oss` CLI), `acquire-oss-capability` skill; unit + real-path Postgres E2E (remote mocked-host + in-house + negative-access + mode-isolation) tests. Reuses FG-07 registry (`kind=remote/in_house`) + FG-11 endpoints + C1/C2/C3/C5/C6; no third-party OSS vendored in-core; no new `HERMES_*` config vars. | Execute the Cloud-agent prompt (final wave) |
+| 2026-07-11 | 4 | devin:ab45de26 | Left the ECS system-test checklist item unchecked | This agent has no access to the system-test ECS box; that deploy/run is coordinated separately by Leo/the orchestrator |
 
 ## Cloud-agent prompt
 > **[Wave 2 — start after FG-07 + FG-11 + FG-12 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md`, this doc (`FG-08`), and `docs/design/architecture-design-number-one.md §4.3` (authoritative). Implement OSS acquisition in two modes (D3): (1) **Remote system** — follow §4.3's 6-stage pipeline (propose→vet→adapt→run→expose-MCP→retire) with ALL hard rails (license allowlist, supply-chain+secret scan, non-root, network-restricted, commit-pinned, **≥2 human approvals** via contract C6), cloning/hosting the project **on a different machine** (use `tools/environments/*` ssh/remote backends) and reaching it via a `fastmcp` MCP registered through FG-11 — do NOT vendor the third-party project under the core repo tree (per `AGENTS.md`); (2) **In-house system** — reuse FG-07's Next.js scaffolder (web UI + MCP). Default to remote/adapt-and-wrap; in-house rebuild only on explicit request or when no suitable OSS exists. Record provenance; start in dev, promote via FG-13; emit C5 change events. Add unit + remote E2E (mocked host) + in-house E2E + negative (license-reject, unapproved-cannot-run) tests; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.
