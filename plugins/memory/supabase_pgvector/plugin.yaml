@@ -1,0 +1,3 @@
+name: supabase_pgvector
+version: 1.0.0
+description: "Live queryable memory tier — Supabase Postgres + pgvector semantic recall, C2 visibility-scoped, C3-routed. The live half of the D2 hybrid memory model."
