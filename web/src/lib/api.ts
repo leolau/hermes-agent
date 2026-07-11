@@ -985,6 +985,43 @@ export const api = {
       },
     ),
 
+  // ── Admin: Tools (FG-07 in-house tool registry + dashboard) ─────────
+  getTools: (mode?: ToolMode) =>
+    fetchJSON<ToolsResponse>(
+      `/api/tools${mode ? `?mode=${encodeURIComponent(mode)}` : ""}`,
+    ),
+  setToolEnabled: (name: string, enabled: boolean, mode?: ToolMode) =>
+    fetchJSON<Tool>(`/api/tools/${encodeURIComponent(name)}/enabled`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled, mode }),
+    }),
+  setToolConfig: (name: string, config: Record<string, unknown>, mode?: ToolMode) =>
+    fetchJSON<Tool>(`/api/tools/${encodeURIComponent(name)}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config, mode }),
+    }),
+  promoteTool: (name: string, mode?: ToolMode) =>
+    fetchJSON<ToolPromotionResult>(
+      `/api/tools/${encodeURIComponent(name)}/promote`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      },
+    ),
+  getToolHealth: (name: string, mode?: ToolMode) =>
+    fetchJSON<ToolHealth>(
+      `/api/tools/${encodeURIComponent(name)}/health${
+        mode ? `?mode=${encodeURIComponent(mode)}` : ""
+      }`,
+    ),
+  getToolChanges: (mode?: ToolMode) =>
+    fetchJSON<ToolChangesResponse>(
+      `/api/tools/changes${mode ? `?mode=${encodeURIComponent(mode)}` : ""}`,
+    ),
+
   // ── Admin: Pairing ──────────────────────────────────────────────────
   getPairing: () => fetchJSON<PairingResponse>("/api/pairing"),
   approvePairing: (platform: string, code: string) =>
@@ -1453,6 +1490,64 @@ export interface SkillHubScan {
 }
 
 // ── Admin types ───────────────────────────────────────────────────────
+
+export type ToolMode = "dev" | "prod";
+export type ToolKind = "in_house" | "remote" | "builtin";
+export type ToolStatus = "enabled" | "disabled";
+
+export interface Tool {
+  id: string;
+  name: string;
+  kind: ToolKind;
+  stack: string;
+  owner_user_id: string;
+  visibility: string;
+  mode: ToolMode;
+  status: ToolStatus;
+  enabled: boolean;
+  mcp_endpoint_ref: string | null;
+  web_url: string | null;
+  config_json: Record<string, unknown>;
+}
+
+export interface ToolsResponse {
+  configured: boolean;
+  mode: ToolMode;
+  tools: Tool[];
+  detail?: string;
+}
+
+export interface ToolPromotionResult {
+  ok: boolean;
+  tool_name: string;
+  approval_ref: string;
+  change_ref: string;
+  promotion_ref: string;
+}
+
+export interface ToolHealth {
+  name: string;
+  reachable: boolean;
+  detail?: string;
+  web_url?: string;
+}
+
+export interface ToolChange {
+  id: string;
+  actor_user_id: string | null;
+  mode: string;
+  target_kind: string;
+  reversible: boolean;
+  visibility: string;
+  undone: boolean;
+  payload: unknown;
+}
+
+export interface ToolChangesResponse {
+  configured: boolean;
+  changes: ToolChange[];
+  detail?: string;
+}
 
 export interface McpServer {
   name: string;

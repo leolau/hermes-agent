@@ -11933,7 +11933,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "project", "promote", "proxy",
         "prompt-size",
         "send", "sessions", "setup",
-        "skills", "slack", "status", "tools", "uninstall", "update",
+        "skills", "slack", "status", "tool", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
@@ -12644,6 +12644,13 @@ def main():
     from hermes_cli.promote import register_promote_subparser
 
     register_promote_subparser(subparsers)
+
+    # =========================================================================
+    # tool command — create/manage in-house tools + the C2/C3 tool registry
+    # =========================================================================
+    from hermes_cli.tool_cmd import register_tool_subparser
+
+    register_tool_subparser(subparsers)
 
     # =========================================================================
     # owner command — inspect/transfer the single shared-brain owner (C1)

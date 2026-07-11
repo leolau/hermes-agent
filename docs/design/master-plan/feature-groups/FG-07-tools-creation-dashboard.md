@@ -58,18 +58,19 @@ dev sessions.
 Tests green + baseline green + `ruff`/`ty` (Python) + web lint/typecheck clean; scaffolded tool exposes both web UI + MCP; dashboard manages lifecycle; no new non-secret env vars; `data-component` convention applied to new web components; **ECS system test green**.
 
 ## Progress checklist
-- [ ] Tool registry (scope/mode/status)
-- [ ] `hermes tool new` Next.js scaffolder (web UI + MCP, own Node process)
-- [ ] Dashboard: manage/config/promote + health + change-log view
-- [ ] Config UX (config.yaml/config_json, no HERMES_* non-secret)
-- [ ] tests (unit + negative + E2E) green
-- [ ] System test on the system-test ECS passed (see *System testing* section)
+- [x] Tool registry (scope/mode/status) — `hermes_cli/tools_registry.py`: C3 mode-aware, C2-scoped, in_house/remote/builtin, dev/prod status + config validation + approval-gated `promote_tool`
+- [x] `hermes tool new` Next.js scaffolder (web UI + MCP, own Node process) — `hermes_cli/tool_scaffold.py` + `hermes_cli/tool_cmd.py`; deterministic per-tool port, thin `mcp/server.mjs`, FG-11 endpoint registration, `create-in-house-tool` skill
+- [x] Dashboard: manage/config/promote + health + change-log view — `web/src/pages/ToolsPage.tsx` + `/api/tools*` routes in `hermes_cli/web_server.py`
+- [x] Config UX (config.yaml/config_json, no HERMES_* non-secret) — `validate_tool_config` rejects `HERMES_*` keys; JSON config editor dialog on the dashboard
+- [x] tests (unit + negative + E2E) green — `tests/hermes_cli/test_fg07_tool_scaffold.py` (config validation, scaffold shape, real Node MCP handshake) + `tests/hermes_cli/test_fg07_tools_registry_e2e.py` (throwaway Postgres: CRUD, mode isolation, C2 negative-access, viewer/non-owner denial, approval-gated promotion audit, no data copy)
+- [ ] System test on the system-test ECS passed (see *System testing* section) — pending owner (Leo) coordination; not run here (no ECS/prod access)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
 | 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
+| 2026-07-11 | 3 | devin:e58d1a11 | Implemented FG-07: C3/C2 tool registry, `hermes tool` CLI + Next.js/MCP scaffolder, `create-in-house-tool` skill, dashboard (ToolsPage + `/api/tools*`), unit + throwaway-Postgres E2E tests. ruff/ty clean, baseline green, web lint/typecheck at baseline. | Wave 2 delivery; publishes the tool registry FG-08 depends on |
 
 ## Cloud-agent prompt
 > **[Wave 2 — start after FG-11 + FG-12 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-07`). Implement **tool creation + configuration + dashboard**. Add a `mode`-aware, scope-aware (contract C2) **tool registry** in Supabase `app_*`. Build `hermes tool new <name>` (CLI+skill) that scaffolds an **in-house tool = Next.js app in its own Node process** exposing BOTH a **web UI** and a **thin MCP server** (registered via FG-11). Behavioural config lives in `config.yaml`/`config_json` — **never new `HERMES_*` env vars** (secrets only; auto-enable on credential presence per existing pattern). Extend the `web/` dashboard (React 19/Vite/Tailwind/Nous UI via `hermes_cli/web_server.py`) to list/enable/disable/configure/promote tools, show health, link the tool's web UI, and render the FG-12 change log. Tools start in **dev**, promote via FG-13 (approval + change-event C5/C6). New web components MUST carry `data-component="ComponentName"` on their root element. Follow `AGENTS.md` (tools are MCP-exposed, NOT new core tools; footprint ladder). Add unit + negative-access + E2E tests + web lint/typecheck; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.

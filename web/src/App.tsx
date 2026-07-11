@@ -87,6 +87,7 @@ import ProfileBuilderPage from "@/pages/ProfileBuilderPage";
 import SkillsPage from "@/pages/SkillsPage";
 import PluginsPage from "@/pages/PluginsPage";
 import McpPage from "@/pages/McpPage";
+import ToolsPage from "@/pages/ToolsPage";
 import PairingPage from "@/pages/PairingPage";
 import ChannelsPage from "@/pages/ChannelsPage";
 import WebhooksPage from "@/pages/WebhooksPage";
@@ -143,6 +144,7 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/skills": SkillsPage,
   "/plugins": PluginsPage,
   "/mcp": McpPage,
+  "/tools": ToolsPage,
   "/pairing": PairingPage,
   "/comms": CommsPage,
   "/channels": ChannelsPage,
@@ -188,6 +190,7 @@ const BUILTIN_NAV_REST: NavItem[] = [
   { path: "/skills", labelKey: "skills", label: "Skills", icon: Package },
   { path: "/plugins", labelKey: "plugins", label: "Plugins", icon: Puzzle },
   { path: "/mcp", label: "MCP", icon: Plug },
+  { path: "/tools", label: "Tools", icon: Zap },
   { path: "/channels", label: "Channels", icon: Radio },
   { path: "/webhooks", label: "Webhooks", icon: Webhook },
   { path: "/pairing", label: "Pairing", icon: ShieldCheck },
