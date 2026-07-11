@@ -11925,7 +11925,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
     {
         "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
-        "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
+        "changes", "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
@@ -12651,6 +12651,13 @@ def main():
     from hermes_cli.owner import register_owner_subparser
 
     register_owner_subparser(subparsers)
+
+    # =========================================================================
+    # changes command — review/undo/redo recorded change events (C5/FG-12)
+    # =========================================================================
+    from hermes_cli.changes_cli import register_changes_subparser
+
+    register_changes_subparser(subparsers)
 
     # =========================================================================
     # login command  (parser built in hermes_cli/subcommands/login.py)
