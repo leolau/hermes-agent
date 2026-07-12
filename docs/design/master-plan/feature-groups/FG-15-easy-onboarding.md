@@ -1,6 +1,6 @@
 # FG-15 — Easy onboarding
 
-**Wave:** B (Phase-2) · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** B (Phase-2) · **Owner agent:** devin:581cc02e · **Status:** CLI + backend + schema + readiness API implemented (dashboard first-run wizard UI deferred to FG-17); ECS system test pending (Leo-owned)
 
 ## Summary
 Make first-time setup **very easy and unambiguous**: clearly surface the small
@@ -70,17 +70,18 @@ checks. DSN/secret entry uses the secret flow (never printed/committed).
 Tests green + baseline green + `ruff`/`ty` (+ web lint/typecheck for the wizard) clean; required-vs-optional schema + readiness score implemented; CLI + dashboard share one backend; secrets→`.env`, behaviour→`config.yaml`; **ECS system test green**.
 
 ## Progress checklist
-- [ ] Typed setup schema (required vs optional; the essential 5)
-- [ ] Guided flow: extend `hermes setup` (CLI) + dashboard first-run wizard (one backend)
-- [ ] Readiness score (dashboard widget + `hermes status`) + prod-ready gate
-- [ ] Idempotent/resumable; secrets→`.env`, behaviour→`config.yaml`
-- [ ] tests (unit + E2E + no-new-env) green
-- [ ] System test on the system-test ECS passed (see *System testing* section)
+- [x] Typed setup schema (required vs optional; the essential 5) — `hermes_cli/onboarding_readiness.py`
+- [x] Guided flow: extend `hermes setup` (CLI) + one shared backend — new `hermes setup essentials` section (check + fix + rationale per required item); dashboard first-run wizard **UI deferred to FG-17** (consumes the same backend)
+- [x] Readiness score (`hermes status` + `GET /api/onboarding/readiness`) + prod-ready gate — dashboard widget UI deferred to FG-17
+- [x] Idempotent/resumable (reuse `onboarding.seen`); secrets→`.env`, behaviour→`config.yaml`; traced via C8
+- [x] tests (unit + E2E + no-new-env) green
+- [ ] System test on the system-test ECS passed (see *System testing* section) — **owned by Leo; not run in this session**
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-12 | 1 | devin:8cec0d47 (for Leo) | Created FG doc | Phase-2 req 15.0: onboarding must be very easy; clearly surface the must-have setup info |
+| 2026-07-12 | 2 | devin:581cc02e (for Leo) | Implemented CLI + backend + schema + readiness API (typed setup schema, `hermes setup essentials`, readiness on `hermes status`, `GET /api/onboarding/readiness`, prod gate, C8 trace, unit+E2E+no-new-env tests) | Deliver req 15.0 CLI/backend scope; dashboard first-run wizard UI deferred to FG-17; ECS system test + prod promotion remain Leo-owned gated steps |
 
 ## Cloud-agent prompt
 > **[Phase-2 Wave B — start after FG-01/FG-13 merged; dashboard wizard after FG-17]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-15`). Make onboarding **very easy**: define a typed **setup schema** that marks each item **required** vs **optional** (the essential 5 required: owner identity (C1), LLM provider secret e.g. `DEEPSEEK_API_KEY`, Supabase `app_*` DSN (C3), at least one Telegram channel; optional: more channels/users/tools/memory). Extend the existing `hermes setup` wizard AND add a **dashboard first-run wizard** that call the SAME backend; each required item has a check + fix action + one-line rationale. Add a computed **readiness score** surfaced on the dashboard and `hermes status`, and gate the "ready for prod" state on all required items met. Secrets go to `.env` via the existing secret flow; **all behavioural setup stays in `config.yaml`** (no new `HERMES_*` non-secret vars). Idempotent/resumable (reuse `onboarding.seen`), traced via C8. Follow `AGENTS.md` (extend, don't duplicate; footprint ladder). Add unit + E2E (temp `HERMES_HOME`) + no-new-env tests + web lint/typecheck; keep baseline green; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist passes** — coordinate with Leo.

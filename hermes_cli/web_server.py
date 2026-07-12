@@ -4595,6 +4595,31 @@ async def get_schema():
     return {"fields": CONFIG_SCHEMA, "category_order": _CATEGORY_ORDER}
 
 
+@app.get("/api/onboarding/readiness")
+async def get_onboarding_readiness(profile: Optional[str] = None):
+    """FG-15 onboarding readiness for the dashboard first-run wizard (FG-17).
+
+    Returns the same typed setup schema + readiness score the CLI computes
+    (``hermes status`` / ``hermes setup essentials``), including the
+    ``ready_for_prod`` gate. Reports secret *presence* only — never values.
+    """
+    from hermes_cli.onboarding_readiness import evaluate_async
+
+    # Config-only (contextvar) scope, NOT _profile_scope: this handler awaits
+    # the C1 owner probe, and _profile_scope swaps process-global state a
+    # concurrent request would cross-restore across that await. We snapshot the
+    # (env-expanded) config inside the scope, then pass it explicitly so the
+    # awaited probe never depends on process-global profile state.
+    requested = (profile or "").strip()
+    if requested and requested.lower() != "current":
+        with _config_profile_scope(requested):
+            config = load_config()
+    else:
+        config = load_config()
+    readiness = await evaluate_async(config, include_owner=True)
+    return readiness.as_dict()
+
+
 _EMPTY_MODEL_INFO: dict = {
     "model": "",
     "provider": "",
