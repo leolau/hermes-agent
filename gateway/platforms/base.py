@@ -5429,6 +5429,23 @@ class BasePlatformAdapter(ABC):
         """Get and clear any pending message for a session."""
         return self._pending_messages.pop(session_key, None)
     
+    @property
+    def account_id(self) -> Optional[str]:
+        """FG-03/C4 receiving-inbox identity for this adapter instance.
+
+        WHICH of my accounts (a specific WhatsApp number / email inbox / bot)
+        took a message in — used to isolate per-account conversations under the
+        one shared brain and route egress replies via the correct account.
+        Read from ``platforms.<p>.extra.account_id`` in the gateway config
+        (same ``config.extra`` convention as ``group_sessions_per_user`` etc.)
+        so it is behavioral config, not a secret env var. ``None`` (the
+        default) keeps session keys byte-identical for single-account
+        deployments. Subclasses may override to derive it from a resolved
+        bot/phone/mailbox identity.
+        """
+        val = self.config.extra.get("account_id")
+        return str(val) if val else None
+
     def build_source(
         self,
         chat_id: str,
@@ -5445,11 +5462,13 @@ class BasePlatformAdapter(ABC):
         parent_chat_id: Optional[str] = None,
         message_id: Optional[str] = None,
         role_authorized: bool = False,
+        account_id: Optional[str] = None,
     ) -> SessionSource:
         """Helper to build a SessionSource for this platform."""
         # Normalize empty topic to None
         if chat_topic is not None and not chat_topic.strip():
             chat_topic = None
+        resolved_account_id = account_id if account_id is not None else self.account_id
         return SessionSource(
             platform=self.platform,
             chat_id=str(chat_id),
@@ -5466,6 +5485,7 @@ class BasePlatformAdapter(ABC):
             parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
             message_id=str(message_id) if message_id else None,
             role_authorized=role_authorized,
+            account_id=str(resolved_account_id) if resolved_account_id else None,
         )
     
     @abstractmethod

@@ -1706,6 +1706,11 @@ from gateway.whatsapp_identity import (
 logger = logging.getLogger(__name__)
 
 
+# Sentinel distinguishing "principal store not yet resolved" from a resolved
+# ``None`` (app DB not configured), so the FG-03 lookup is cached exactly once.
+_UNSET_PRINCIPAL_STORE = object()
+
+
 _OWN_POLICY_OPEN_ENV = {
     Platform.WECOM: ("WECOM_DM_POLICY", "WECOM_GROUP_POLICY", "WECOM_ALLOW_ALL_USERS"),
     Platform.WEIXIN: ("WEIXIN_DM_POLICY", "WEIXIN_GROUP_POLICY", "WEIXIN_ALLOW_ALL_USERS"),
@@ -3281,6 +3286,100 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     @property
     def exit_code(self) -> Optional[int]:
         return self._exit_code
+
+    def _get_principal_store(self):
+        """Return a C1 :class:`PrincipalStore` for channel identity resolution.
+
+        FG-03 live-gateway wiring: channel senders are mapped to an internal
+        system :class:`~hermes_cli.access.Principal` so a session keys per
+        *internal* user (RLS-scoped shared/private data), not per raw channel
+        handle. Returns ``None`` — a no-op that leaves keying on channel
+        identity — unless ``datastore.supabase_app.dsn`` is configured, so
+        single-account / DB-less deployments are unaffected and session keys
+        stay byte-identical. Cached (including the ``None`` result) so the
+        config read and store construction happen once.
+        """
+        cached = getattr(self, "_principal_store_cache", _UNSET_PRINCIPAL_STORE)
+        if cached is not _UNSET_PRINCIPAL_STORE:
+            return cached
+        store = None
+        try:
+            from hermes_cli.config import load_config_readonly
+            from hermes_cli.datastore import SupabaseAppStore, _config_get
+
+            cfg = load_config_readonly()
+            raw_dsn = _config_get(
+                cfg, "datastore", "supabase_app", "dsn", default=""
+            )
+            dsn = os.path.expandvars(str(raw_dsn or "")).strip()
+            # An unexpanded ``${VAR}`` placeholder means the env var is unset —
+            # treat that (and empty) as "app DB not configured".
+            if dsn and "${" not in dsn:
+                from hermes_cli.access import PrincipalStore
+
+                # Channels are prod-only (D5/C3), so bind to the prod schema.
+                app_store = SupabaseAppStore("prod", "app_prod", dsn)
+                store = PrincipalStore(app_store)
+        except Exception:
+            logger.debug(
+                "Principal store unavailable; channel sessions will key on "
+                "channel identity only.",
+                exc_info=True,
+            )
+            store = None
+        self._principal_store_cache = store
+        return store
+
+    async def _enrich_channel_source_identity(
+        self, source: SessionSource
+    ) -> SessionSource:
+        """FG-03: stamp the receiving ``account_id`` + resolve the internal user.
+
+        Called once at the inbound chokepoint so the live gateway realises the
+        one-brain / per-internal-user contract instead of keying purely on the
+        raw channel handle:
+
+        * ``account_id`` — the receiving adapter's inbox identity, so two of my
+          accounts on one platform never collide and egress leaves via the
+          right account.
+        * ``internal_user_id`` — resolved from the channel sender via the C1
+          ``bind_channel_principal`` seam (pairing/enrolment owned by
+          ``gateway/pairing.py``), so several channel handles for one person
+          share one internal-user-scoped core.
+
+        Both are additive and gated: when the adapter exposes no ``account_id``
+        and no principal store is configured, ``source`` is returned unchanged
+        (byte-identical session key). Never raises into the message path — a
+        resolution failure logs and falls back to channel-identity keying.
+        """
+        try:
+            adapter = self.adapters.get(source.platform) if self.adapters else None
+        except Exception:
+            adapter = None
+        account_id = None
+        if adapter is not None:
+            try:
+                account_id = adapter.account_id
+            except Exception:
+                account_id = None
+        if account_id and not source.account_id:
+            source = dataclasses.replace(source, account_id=str(account_id))
+
+        if not source.internal_user_id:
+            store = self._get_principal_store()
+            if store is not None:
+                try:
+                    from gateway.inbound import bind_channel_principal
+
+                    await bind_channel_principal(source, store=store)
+                except Exception:
+                    logger.debug(
+                        "Channel principal resolution failed for %s; keying on "
+                        "channel identity.",
+                        source.platform,
+                        exc_info=True,
+                    )
+        return source
 
     def _session_key_for_source(self, source: SessionSource) -> str:
         """Resolve the current session key for a source, honoring gateway config when available."""
@@ -10163,6 +10262,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 event.source = source
             except Exception:
                 pass
+
+        # FG-03 one-brain wiring: stamp the receiving account and resolve the
+        # channel sender to an internal principal so this turn keys per-account
+        # and per-internal-user (a no-op that leaves ``source`` unchanged when
+        # neither is configured — see ``_enrich_channel_source_identity``).
+        source = await self._enrich_channel_source_identity(source)
+        try:
+            event.source = source
+        except Exception:
+            pass
 
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
