@@ -17,6 +17,10 @@ import {
   setPluginLoadError,
 } from "./registry";
 
+// Next.js statically replaces `process.env.NODE_ENV` at build time, so this
+// compiles to a constant boolean in the client bundle (no runtime `process`).
+const IS_DEV = process.env.NODE_ENV !== "production";
+
 export function usePlugins() {
   const [manifests, setManifests] = useState<PluginManifest[]>([]);
   const [plugins, setPlugins] = useState<RegisteredPlugin[]>([]);
@@ -56,10 +60,10 @@ export function usePlugins() {
       // in-memory registry while the browser would otherwise never
       // re-execute a previously cached <script> URL.
       const baseUrl = `${HERMES_BASE_PATH}/dashboard-plugins/${manifest.name}/${manifest.entry}`;
-      const scriptSrc = import.meta.env.DEV
+      const scriptSrc = IS_DEV
         ? `${baseUrl}?hermes_dv=${Date.now()}`
         : baseUrl;
-      if (!import.meta.env.DEV) {
+      if (!IS_DEV) {
         if (loadedScripts.current.has(baseUrl)) continue;
         loadedScripts.current.add(baseUrl);
       }
@@ -99,7 +103,7 @@ export function usePlugins() {
     const timeout = setTimeout(() => setLoading(false), 2000);
     return () => {
       clearTimeout(timeout);
-      if (import.meta.env.DEV) {
+      if (IS_DEV) {
         for (const el of injectedScripts) {
           el.remove();
         }
