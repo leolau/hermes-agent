@@ -83,17 +83,18 @@ carry `mode` via C5/C8. No new schema beyond the manifest + reused change log.
 Tests green (incl. security + no-bypass) + baseline green + `ruff`/`ty` clean; `core_manifest.yaml` committed; runtime guard hard-blocks agent writes to Core (fail-closed, no user override) and audits them; Customizable edits emit C5; **ECS system test green**.
 
 ## Progress checklist
-- [ ] `core_manifest.yaml` + path classifier (fail-closed, escape-safe)
-- [ ] Runtime write-guard at the file/terminal chokepoint (agent-only; hard block + audit)
-- [ ] No-bypass guarantee (manifest self-protected; no disable switch)
-- [ ] Customizable-edit change tracking (C5) for self-improvement history
-- [ ] tests (unit + security + no-bypass + E2E) green
-- [ ] System test on the system-test ECS passed (see *System testing* section)
+- [x] `core_manifest.yaml` + path classifier (fail-closed, escape-safe)
+- [x] Runtime write-guard at the file/terminal chokepoint (agent-only; hard block + audit)
+- [x] No-bypass guarantee (manifest self-protected; no disable switch)
+- [x] Customizable-edit change tracking (C5) for self-improvement history
+- [x] tests (unit + security + no-bypass + E2E) green
+- [ ] System test on the system-test ECS passed (see *System testing* section) — separate gated step owned by Leo; not run by the agent
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-12 | 1 | devin:8cec0d47 (for Leo) | Created FG doc | Phase-2 req 14.0: enforce Core/Customizable boundary; runtime agent must never edit Core |
+| 2026-07-12 | 2 | devin:ce62671e (for Leo) | Implemented C7: `core_manifest.yaml` + `agent/core_boundary.py` guard wired into the agent file-write chokepoint (`tools/file_operations.py` write/patch/delete/move); fail-closed + escape-safe; denials emit C5 audit + C8 `core_denied` trace; unit + security + no-bypass + real-path E2E tests added | Publish C7 as a small additive interface; runtime agent hard-blocked from Core with no override, human dev/git/`hermes update` path unchanged. ECS system test remains a separate gated step owned by Leo. |
 
 ## Cloud-agent prompt
 > **[Phase-2 Wave A — start after Phase-1 develop is merged]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-14`). Publish contract **C7 = Core/Customizable boundary**: commit a machine-readable **`core_manifest.yaml`** (globs for Core: `run_agent.py`, `model_tools.py`, `toolsets.py`, `cli.py`, `hermes_state.py`, core `gateway/**`, the FG-18 GTS engine, the FG-12 change engine, the guard, and the manifest itself; everything else is Customizable). Implement a **hard runtime write-guard** at the agent's file/terminal write chokepoint that **refuses any write whose resolved path is Core** (fail-closed, escape-safe against `..`/symlink/absolute paths) and emits a C5 audit + C8 trace. This applies to the **runtime LLM agent only** — do NOT touch the human dev/git/`hermes update` path. There must be **no config/env/prompt that disables the guard** (the manifest is self-protecting). Every allowed (Customizable) write emits a C5 change-event for self-improvement history. Follow `AGENTS.md` (footprint ladder — a `check_fn`-style gate, NOT a new core tool; `.env` = secrets only). Add unit + **security** (agent write to Core refused+audited) + no-bypass + real-path E2E tests (temp `HERMES_HOME`); keep `tests/plan_baseline/` green; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist passes** — coordinate with Leo.

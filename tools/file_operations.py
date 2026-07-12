@@ -39,6 +39,7 @@ from agent.file_safety import (
     build_write_denied_prefixes,
     is_write_denied as _shared_is_write_denied,
 )
+from agent.core_boundary import check_core_write
 
 
 # ---------------------------------------------------------------------------
@@ -1249,6 +1250,9 @@ class ShellFileOperations(FileOperations):
 
     def _python_delete(self, path: str, recursive: bool) -> WriteResult:
         path = self._expand_path(path)
+        core_denied = check_core_write(path, op="delete")
+        if core_denied is not None:
+            return WriteResult(error=core_denied)
         if _is_write_denied(path):
             return WriteResult(error=f"Delete denied: {path} is a protected path")
 
@@ -1294,6 +1298,12 @@ class ShellFileOperations(FileOperations):
         """Move a file via mv."""
         src = self._expand_path(src)
         dst = self._expand_path(dst)
+        # Guard both endpoints: moving a Core file away deletes Core; moving
+        # onto a Core path overwrites Core. Either is a denied Core write.
+        for p in (src, dst):
+            core_denied = check_core_write(p, op="move")
+            if core_denied is not None:
+                return WriteResult(error=core_denied)
         for p in (src, dst):
             if _is_write_denied(p):
                 return WriteResult(error=f"Move denied: {p} is a protected path")
@@ -1332,6 +1342,11 @@ class ShellFileOperations(FileOperations):
         """
         # Expand ~ and other shell paths
         path = self._expand_path(path)
+
+        # Hard Core boundary (C7): the runtime agent may never modify Core.
+        core_denied = check_core_write(path, op="write")
+        if core_denied is not None:
+            return WriteResult(error=core_denied)
 
         # Block writes to sensitive paths
         if _is_write_denied(path):
@@ -1478,6 +1493,11 @@ class ShellFileOperations(FileOperations):
         """
         # Expand ~ and other shell paths
         path = self._expand_path(path)
+
+        # Hard Core boundary (C7): the runtime agent may never modify Core.
+        core_denied = check_core_write(path, op="patch")
+        if core_denied is not None:
+            return PatchResult(error=core_denied)
 
         # Block writes to sensitive paths
         if _is_write_denied(path):
