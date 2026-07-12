@@ -1,0 +1,1767 @@
+"""Contract C9 — the unified GTS graph (Goals → Tasks → Skills), FG-18.
+
+The **GTS Centre** is a Core tool (D14 / C7): its implementation and governing
+rules are immutable to the runtime agent and to end users — only human
+developers change it through the repo/PR flow. Users and the agent manage GTS
+*data* within the Centre's authority rules.
+
+This module **extends** the existing stores rather than introducing a parallel
+one (the extend-don't-duplicate rule):
+
+* Goals live in the FG-04 ``goals`` table (:mod:`hermes_cli.goal_registry`);
+  this module adds ``parent_goal_id`` / ``level`` / ``score`` /
+  ``evaluation_method_ref`` to it.
+* Tasks live in the FG-06 ``tasks`` table (:mod:`hermes_cli.task_registry`);
+  this module adds ``parent_task_id`` / ``priority`` / ``score`` /
+  ``evaluation_method_ref`` to it.
+* Skills are **referenced** (not copied) by a lightweight ``skills_registry``
+  node pointing at existing skill content (``skill_ref``).
+* Typed edges: ``task_goals`` (M:N task↔goal) and ``task_skills`` (M:N
+  task↔skill); goal/task self-hierarchy via ``parent_*_id`` (cycle-safe).
+* ``evaluation_methods`` — user-owned, agent-immutable rubric rows that define
+  *how* a goal/task is scored. Scores are **always computed** from live
+  metrics / task state, clamped to ``0–100``, and rolled up to parents by
+  priority weight. A score is **never** hand-set.
+
+Contracts consumed (never re-implemented):
+
+* **C3** — every connection is obtained through the injected
+  :class:`~hermes_cli.datastore.SupabaseAppStore` (``app_dev`` / ``app_prod``).
+* **C2** — ``goals`` / ``tasks`` / ``skills_registry`` rows carry
+  ``owner_user_id`` + ``visibility`` and are read through
+  :func:`hermes_cli.access.scope_filter` with Postgres RLS as the DB backstop;
+  edge/method rows are reached only through a scoped join to a readable node.
+* **C5 / C8** — an agent attempt to create/manage a **top-level goal** or to
+  set/change an **evaluation method** is refused and audited (a durable local
+  audit row + an optional injected C5 recorder + a C8 ``core_denied`` trace).
+* Prompt cache is sacred — GTS state is surfaced to the agent only through tool
+  results / appended messages (:func:`render_gts_block`); nothing here mutates
+  the byte-stable system prompt.
+
+The metric maths reuses :class:`hermes_cli.goals.GoalMetric` /
+:func:`hermes_cli.goals.verdict_for_metrics`, so achievement stays *computed*.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
+
+from hermes_cli.access import (
+    Principal,
+    apply_scope_rls,
+    normalize_visibility,
+    scope_filter,
+)
+from hermes_cli.goal_registry import GOALS_TABLE, GoalRegistryStore
+from hermes_cli.goals import (
+    DEFAULT_GOAL_PRIORITY,
+    GoalMetric,
+    normalize_priority,
+    priority_rank,
+    priority_weight,
+    verdict_for_metrics,
+)
+from hermes_cli.task_registry import (
+    TASKS_TABLE,
+    TaskRegistryStore,
+    TaskSpec,
+)
+
+if TYPE_CHECKING:
+    import asyncpg
+
+    from hermes_cli.datastore import SupabaseAppStore
+
+# --- vocabulary -------------------------------------------------------------
+
+#: Who is performing a GTS mutation. ``"user"`` is the human owner path (the
+#: authoritative actor); ``"agent"`` is the runtime LLM agent, which is refused
+#: on top-level goals and evaluation methods (and audited).
+GtsActor = Literal["user", "agent"]
+
+#: A goal's place in the hierarchy. ``top`` goals are user-only; ``sub`` goals
+#: hang off a parent goal and may be managed by the agent.
+GOAL_LEVELS: Tuple[str, ...] = ("top", "sub")
+
+#: The M:N + registry + method tables this module owns (reuses ``goals`` /
+#: ``tasks`` from FG-04/06 rather than duplicating them).
+SKILLS_TABLE = "skills_registry"
+TASK_GOALS_TABLE = "task_goals"
+TASK_SKILLS_TABLE = "task_skills"
+EVALUATION_METHODS_TABLE = "evaluation_methods"
+
+_TARGET_KINDS: Tuple[str, ...] = ("goal", "task")
+
+
+class GtsError(RuntimeError):
+    """Base class for GTS Centre failures."""
+
+
+class GtsAuthorityError(GtsError):
+    """A GTS mutation was refused by the authority model (agent over-reach)."""
+
+
+class GtsCycleError(GtsError):
+    """A hierarchy edit would create a cycle (a node cannot be its own ancestor)."""
+
+
+# ---------------------------------------------------------------------------
+# Schema (additive + idempotent): extend goals/tasks, add edges + registry.
+# ---------------------------------------------------------------------------
+
+_EXTEND_SQL = f"""
+ALTER TABLE {GOALS_TABLE}
+    ADD COLUMN IF NOT EXISTS parent_goal_id UUID
+        REFERENCES {GOALS_TABLE}(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS level TEXT NOT NULL DEFAULT 'top',
+    ADD COLUMN IF NOT EXISTS score DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS evaluation_method_ref UUID;
+CREATE INDEX IF NOT EXISTS {GOALS_TABLE}_parent_idx
+    ON {GOALS_TABLE} (parent_goal_id);
+
+ALTER TABLE {TASKS_TABLE}
+    ADD COLUMN IF NOT EXISTS parent_task_id UUID
+        REFERENCES {TASKS_TABLE}(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT '{DEFAULT_GOAL_PRIORITY}',
+    ADD COLUMN IF NOT EXISTS score DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS evaluation_method_ref UUID;
+CREATE INDEX IF NOT EXISTS {TASKS_TABLE}_parent_idx
+    ON {TASKS_TABLE} (parent_task_id);
+
+CREATE TABLE IF NOT EXISTS {SKILLS_TABLE} (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_user_id TEXT NOT NULL,
+    visibility TEXT NOT NULL,
+    name TEXT NOT NULL,
+    skill_ref TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (owner_user_id, name)
+);
+CREATE INDEX IF NOT EXISTS {SKILLS_TABLE}_visibility_idx
+    ON {SKILLS_TABLE} (visibility);
+
+CREATE TABLE IF NOT EXISTS {TASK_GOALS_TABLE} (
+    task_id UUID NOT NULL REFERENCES {TASKS_TABLE}(id) ON DELETE CASCADE,
+    goal_id UUID NOT NULL REFERENCES {GOALS_TABLE}(id) ON DELETE CASCADE,
+    PRIMARY KEY (task_id, goal_id)
+);
+CREATE INDEX IF NOT EXISTS {TASK_GOALS_TABLE}_goal_idx
+    ON {TASK_GOALS_TABLE} (goal_id);
+
+CREATE TABLE IF NOT EXISTS {TASK_SKILLS_TABLE} (
+    task_id UUID NOT NULL REFERENCES {TASKS_TABLE}(id) ON DELETE CASCADE,
+    skill_id UUID NOT NULL REFERENCES {SKILLS_TABLE}(id) ON DELETE CASCADE,
+    PRIMARY KEY (task_id, skill_id)
+);
+CREATE INDEX IF NOT EXISTS {TASK_SKILLS_TABLE}_skill_idx
+    ON {TASK_SKILLS_TABLE} (skill_id);
+
+CREATE TABLE IF NOT EXISTS {EVALUATION_METHODS_TABLE} (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('goal', 'task')),
+    target_id UUID NOT NULL,
+    method_json JSONB NOT NULL,
+    set_by_user_id TEXT NOT NULL,
+    locked BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (target_kind, target_id)
+);
+"""
+
+
+# ---------------------------------------------------------------------------
+# Records
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GtsGoal:
+    """A goal node in the unified graph (extends the FG-04 goal row)."""
+
+    id: str
+    owner_user_id: str
+    visibility: str
+    title: str
+    priority: str
+    status: str
+    level: str
+    parent_goal_id: Optional[str]
+    score: Optional[float]
+    evaluation_method_ref: Optional[str]
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "owner_user_id": self.owner_user_id,
+            "visibility": self.visibility,
+            "title": self.title,
+            "priority": self.priority,
+            "status": self.status,
+            "level": self.level,
+            "parent_goal_id": self.parent_goal_id,
+            "score": self.score,
+        }
+
+
+@dataclass(frozen=True)
+class GtsTask:
+    """A task node in the unified graph (extends the FG-06 task row)."""
+
+    id: str
+    owner_user_id: str
+    visibility: str
+    title: str
+    priority: str
+    status: str
+    current_state: str
+    completion_state: str
+    parent_task_id: Optional[str]
+    score: Optional[float]
+    evaluation_method_ref: Optional[str]
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "owner_user_id": self.owner_user_id,
+            "visibility": self.visibility,
+            "title": self.title,
+            "priority": self.priority,
+            "status": self.status,
+            "current_state": self.current_state,
+            "parent_task_id": self.parent_task_id,
+            "score": self.score,
+        }
+
+
+@dataclass(frozen=True)
+class SkillNode:
+    """A registry node that *references* existing skill content (never copies it)."""
+
+    id: str
+    owner_user_id: str
+    visibility: str
+    name: str
+    skill_ref: str
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "owner_user_id": self.owner_user_id,
+            "visibility": self.visibility,
+            "name": self.name,
+            "skill_ref": self.skill_ref,
+        }
+
+
+@dataclass(frozen=True)
+class EvaluationMethod:
+    """A user-owned, agent-immutable scoring rubric for a goal or task."""
+
+    id: str
+    target_kind: str
+    target_id: str
+    method: Mapping[str, object]
+    set_by_user_id: str
+    locked: bool
+
+
+@dataclass(frozen=True)
+class GtsAuditEvent:
+    """One audited GTS decision (surfaced to C5/C8 + a durable local log)."""
+
+    id: str
+    ts: float
+    actor: GtsActor
+    actor_user_id: str
+    action: str
+    target_kind: str
+    target_ref: str
+    decision: str  # "refused" | "recorded"
+    reason: str
+    mode: str
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "ts": self.ts,
+            "actor": self.actor,
+            "actor_user_id": self.actor_user_id,
+            "action": self.action,
+            "target_kind": self.target_kind,
+            "target_ref": self.target_ref,
+            "decision": self.decision,
+            "reason": self.reason,
+            "mode": self.mode,
+            # C8 trace row kind for a refused Core-authority mutation.
+            "kind": "core_denied",
+        }
+
+
+#: A C5 change-audit sink (e.g. an adapter over the FG-12 ``ChangeLog``). Given
+#: the shaped audit event; must never raise into the mutation path.
+GtsAuditSink = Callable[[Mapping[str, object]], None]
+
+
+# ---------------------------------------------------------------------------
+# Pure scoring (always computed, clamped 0–100, priority-weighted rollup)
+# ---------------------------------------------------------------------------
+
+
+def clamp_score(value: float) -> float:
+    """Clamp any raw score onto the closed ``[0, 100]`` band."""
+    return max(0.0, min(100.0, float(value)))
+
+
+def score_from_metrics(
+    metrics: Sequence[GoalMetric],
+    *,
+    weights: Optional[Mapping[str, float]] = None,
+) -> float:
+    """Compute a leaf goal score as a weighted mean of metric progress × 100.
+
+    Reuses :attr:`GoalMetric.progress_fraction` (already clamped to ``[0, 1]``)
+    so achievement is measured, not asserted. Unmeasured metrics (no target)
+    contribute ``0``. With no measurable metric the score is ``0`` — there is
+    no evidence of progress yet. The result is clamped to ``[0, 100]``.
+    """
+    measurable = [m for m in metrics if m.is_measurable()]
+    if not measurable:
+        return 0.0
+    total_weight = 0.0
+    accumulated = 0.0
+    for metric in measurable:
+        weight = float((weights or {}).get(metric.name, 1.0))
+        if weight <= 0.0:
+            continue
+        total_weight += weight
+        accumulated += weight * metric.progress_fraction * 100.0
+    if total_weight <= 0.0:
+        return 0.0
+    return clamp_score(accumulated / total_weight)
+
+
+def score_from_progress(
+    progress_states: Sequence[str],
+    current_state: str,
+    completion_state: str,
+    *,
+    status: str = "",
+    state_scores: Optional[Mapping[str, float]] = None,
+) -> float:
+    """Compute a leaf task score from its FG-06 progress state machine.
+
+    An explicit ``state_scores`` rubric (from the user's evaluation method)
+    wins when it names the current state. Otherwise the score is the fraction
+    of the way from the trigger to the completion state, so ``completed`` is
+    ``100`` and a cancelled task is ``0``. Always clamped to ``[0, 100]``.
+    """
+    if status == "cancelled":
+        return 0.0
+    if state_scores and current_state in state_scores:
+        return clamp_score(float(state_scores[current_state]))
+    states = list(progress_states)
+    if current_state not in states or completion_state not in states:
+        return 0.0
+    completion_index = states.index(completion_state)
+    if completion_index <= 0:
+        return 100.0 if current_state == completion_state else 0.0
+    fraction = states.index(current_state) / completion_index
+    return clamp_score(fraction * 100.0)
+
+
+def rollup_score(children: Sequence[Tuple[float, str]]) -> float:
+    """Roll child scores up to a parent as a **priority-weighted** mean.
+
+    ``children`` is ``(score, priority)`` pairs. Higher-priority children pull
+    the parent's score harder (weights from
+    :func:`hermes_cli.goals.priority_weight`). Empty → ``0``. Clamped.
+    """
+    if not children:
+        return 0.0
+    total_weight = 0
+    accumulated = 0.0
+    for score, priority in children:
+        weight = priority_weight(priority)
+        total_weight += weight
+        accumulated += weight * clamp_score(score)
+    if total_weight <= 0:
+        return 0.0
+    return clamp_score(accumulated / total_weight)
+
+
+# ---------------------------------------------------------------------------
+# Cache-safe surfacing (tool result / appended message — never the prompt)
+# ---------------------------------------------------------------------------
+
+
+def render_gts_block(
+    goals: Sequence[GtsGoal],
+    *,
+    title: str = "GTS Centre",
+) -> str:
+    """Render a GTS goal slate as a labelled text block.
+
+    Cache-safe by construction (mirrors :func:`goals.render_metrics_block`):
+    the caller only ever appends this to a continuation *user* message or hands
+    it to a tool result — it is never spliced into the byte-stable system
+    prompt, so prompt caching is preserved.
+    """
+    lines = [f"[{title}]"]
+    if not goals:
+        lines.append("(no goals)")
+        return "\n".join(lines)
+    for goal in sorted(goals, key=lambda g: (priority_rank(g.priority), g.title)):
+        score = "—" if goal.score is None else f"{goal.score:.0f}%"
+        marker = "•" if goal.level == "top" else "  ↳"
+        lines.append(
+            f"{marker} {goal.title} [{goal.priority}] score={score} "
+            f"({goal.status})"
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# The GTS Centre engine
+# ---------------------------------------------------------------------------
+
+
+class GtsCentre:
+    """Async unified-graph engine over the C2-scoped, C3-routed GTS tables.
+
+    Composes the FG-04 goal registry and FG-06 task registry (reuse, not
+    duplication) and adds hierarchy, M:N edges, a skills registry, user-owned
+    evaluation methods, and computed/rolled-up scores. Authority is fail-closed:
+    the runtime agent is refused (and audited) on top-level goals and on any
+    evaluation-method change.
+    """
+
+    def __init__(
+        self,
+        store: "SupabaseAppStore",
+        *,
+        audit_sink: Optional[GtsAuditSink] = None,
+    ) -> None:
+        self._store = store
+        self._goals = GoalRegistryStore(store)
+        self._tasks = TaskRegistryStore(store)
+        self._audit_sink = audit_sink
+
+    @property
+    def mode(self) -> str:
+        return self._store.mode
+
+    @property
+    def goals(self) -> GoalRegistryStore:
+        return self._goals
+
+    @property
+    def tasks(self) -> TaskRegistryStore:
+        return self._tasks
+
+    async def _connect(self) -> "asyncpg.Connection":
+        connection = await self._store.connect()
+        await connection.execute(
+            f'CREATE SCHEMA IF NOT EXISTS "{self._store.schema}"'
+        )
+        return connection
+
+    async def initialize(
+        self,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> None:
+        """Create/extend every GTS table + RLS policy (idempotent)."""
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            await self._goals.initialize(connection=conn)
+            await self._tasks.initialize(connection=conn)
+            await conn.execute(_EXTEND_SQL)
+            await apply_scope_rls(conn, SKILLS_TABLE)
+        finally:
+            if own:
+                await conn.close()
+
+    # -- authority + audit -------------------------------------------------
+
+    def _audit(
+        self,
+        *,
+        actor: GtsActor,
+        actor_user_id: str,
+        action: str,
+        target_kind: str,
+        target_ref: str,
+        decision: str,
+        reason: str,
+    ) -> GtsAuditEvent:
+        event = GtsAuditEvent(
+            id=f"gts_{uuid.uuid4().hex}",
+            ts=time.time(),
+            actor=actor,
+            actor_user_id=actor_user_id,
+            action=action,
+            target_kind=target_kind,
+            target_ref=target_ref,
+            decision=decision,
+            reason=reason,
+            mode=self.mode,
+        )
+        # C8 — observational trace (no-op when no trace is bound; cache-safe).
+        try:
+            from hermes_cli.interactions import observe
+
+            observe(
+                "core_denied" if decision == "refused" else "change",
+                ref=event.id,
+                summary=f"GTS {action} {target_kind}:{target_ref} → {decision}",
+            )
+        except Exception:
+            pass
+        # Durable local audit — the always-on guarantee (mirrors FG-14 C7).
+        _append_local_audit(event)
+        # C5 — best-effort forward to an injected change recorder.
+        if self._audit_sink is not None:
+            try:
+                self._audit_sink(event.as_dict())
+            except Exception:
+                pass
+        return event
+
+    def _require_user(
+        self,
+        actor: GtsActor,
+        actor_user_id: str,
+        *,
+        action: str,
+        target_kind: str,
+        target_ref: str,
+    ) -> None:
+        """Fail-closed guard: only the user may perform ``action``.
+
+        A runtime-agent attempt is audited (C5/C8 + durable log) and refused.
+        """
+        if actor == "user":
+            return
+        self._audit(
+            actor=actor,
+            actor_user_id=actor_user_id,
+            action=action,
+            target_kind=target_kind,
+            target_ref=target_ref,
+            decision="refused",
+            reason=(
+                f"{action} on a {target_kind} is user-only (Core authority C7/C9); "
+                "the runtime agent is refused"
+            ),
+        )
+        raise GtsAuthorityError(
+            f"Refused: the runtime agent may not {action} (user-only under the "
+            f"GTS Centre's Core authority rules). This attempt has been audited."
+        )
+
+    # -- goals -------------------------------------------------------------
+
+    async def create_goal(
+        self,
+        principal: Principal,
+        title: str,
+        *,
+        actor: GtsActor = "user",
+        parent_goal_id: Optional[str] = None,
+        priority: str = DEFAULT_GOAL_PRIORITY,
+        visibility: Optional[str] = None,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> GtsGoal:
+        """Create a goal.
+
+        A **top-level** goal (``parent_goal_id is None``) is *user-only* — an
+        agent attempt is refused and audited. A **sub-goal** may be created by
+        the agent under a parent that ``principal`` can read.
+        """
+        clean_title = (title or "").strip()
+        if not clean_title:
+            raise ValueError("Cannot create a goal with an empty title")
+        resolved_visibility = _resolve_visibility(principal, visibility)
+        resolved_priority = normalize_priority(priority)
+
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            if parent_goal_id is None:
+                self._require_user(
+                    actor,
+                    principal.user_id,
+                    action="create a top-level goal",
+                    target_kind="goal",
+                    target_ref="(new top-level goal)",
+                )
+                level = "top"
+            else:
+                parent = await self._get_goal_node(
+                    principal, parent_goal_id, conn
+                )
+                if parent is None:
+                    raise PermissionError(
+                        f"Parent goal {parent_goal_id} not found or not visible "
+                        f"to {principal.user_id}"
+                    )
+                level = "sub"
+            row = await conn.fetchrow(
+                f"""
+                INSERT INTO {GOALS_TABLE}
+                    (owner_user_id, visibility, title, priority,
+                     parent_goal_id, level)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING {_GOAL_COLUMNS}
+                """,
+                principal.user_id,
+                resolved_visibility,
+                clean_title,
+                resolved_priority,
+                parent_goal_id,
+                level,
+            )
+            goal = _row_to_goal_node(row)
+            self._audit(
+                actor=actor,
+                actor_user_id=principal.user_id,
+                action="create_goal",
+                target_kind="goal",
+                target_ref=goal.id,
+                decision="recorded",
+                reason=f"created {level} goal",
+            )
+            return goal
+        finally:
+            if own:
+                await conn.close()
+
+    async def get_goal(
+        self,
+        principal: Principal,
+        goal_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> Optional[GtsGoal]:
+        """Return the goal node if ``principal`` may read it (C2), else None."""
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            return await self._get_goal_node(principal, goal_id, conn)
+        finally:
+            if own:
+                await conn.close()
+
+    async def list_goals(
+        self,
+        principal: Principal,
+        *,
+        parent_goal_id: Optional[str] = None,
+        top_level_only: bool = False,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> List[GtsGoal]:
+        """List readable goal nodes, priority-ordered.
+
+        With ``parent_goal_id`` returns that goal's direct children; with
+        ``top_level_only`` returns only ``level = 'top'`` goals.
+        """
+        clauses: List[str] = []
+        params: List[object] = []
+        index = 1
+        if parent_goal_id is not None:
+            clauses.append(f"parent_goal_id = ${index}")
+            params.append(parent_goal_id)
+            index += 1
+        elif top_level_only:
+            clauses.append("parent_goal_id IS NULL")
+        predicate = scope_filter(principal, start_index=index)
+        clauses.append(predicate.sql)
+        params.extend(predicate.params)
+
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            rows = await conn.fetch(
+                f"""
+                SELECT {_GOAL_COLUMNS} FROM {GOALS_TABLE}
+                WHERE {" AND ".join(clauses)}
+                """,
+                *params,
+            )
+            goals = [_row_to_goal_node(r) for r in rows]
+            return sorted(goals, key=lambda g: (priority_rank(g.priority), g.title))
+        finally:
+            if own:
+                await conn.close()
+
+    async def set_goal_priority(
+        self,
+        principal: Principal,
+        goal_id: str,
+        priority: str,
+        *,
+        actor: GtsActor = "user",
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> GtsGoal:
+        """Change a goal's priority (managing a top-level goal is user-only)."""
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            goal = await self._require_goal_manageable(
+                principal, goal_id, conn, actor=actor, action="set_goal_priority"
+            )
+            row = await conn.fetchrow(
+                f"""
+                UPDATE {GOALS_TABLE}
+                SET priority = $2, updated_at = NOW()
+                WHERE id = $1
+                RETURNING {_GOAL_COLUMNS}
+                """,
+                goal.id,
+                normalize_priority(priority),
+            )
+            return _row_to_goal_node(row)
+        finally:
+            if own:
+                await conn.close()
+
+    async def reparent_goal(
+        self,
+        principal: Principal,
+        goal_id: str,
+        new_parent_goal_id: Optional[str],
+        *,
+        actor: GtsActor = "user",
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> GtsGoal:
+        """Move a goal under a new parent (or to top-level), cycle-safe.
+
+        Promoting a goal to top-level (``new_parent_goal_id is None``) is
+        user-only. Reparenting refuses a self-parent or any parent that is a
+        descendant of the goal (which would create a cycle).
+        """
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            goal = await self._get_goal_node(principal, goal_id, conn)
+            if goal is None:
+                raise PermissionError(
+                    f"Goal {goal_id} not found or not visible to {principal.user_id}"
+                )
+            if new_parent_goal_id is None:
+                self._require_user(
+                    actor,
+                    principal.user_id,
+                    action="promote a goal to top-level",
+                    target_kind="goal",
+                    target_ref=goal_id,
+                )
+                level = "top"
+            else:
+                if new_parent_goal_id == goal_id:
+                    raise GtsCycleError("A goal cannot be its own parent")
+                parent = await self._get_goal_node(
+                    principal, new_parent_goal_id, conn
+                )
+                if parent is None:
+                    raise PermissionError(
+                        f"Parent goal {new_parent_goal_id} not found or not "
+                        f"visible to {principal.user_id}"
+                    )
+                if await self._is_goal_descendant(
+                    conn, ancestor=goal_id, candidate=new_parent_goal_id
+                ):
+                    raise GtsCycleError(
+                        f"Reparenting {goal_id} under {new_parent_goal_id} "
+                        "would create a cycle"
+                    )
+                level = "sub"
+            row = await conn.fetchrow(
+                f"""
+                UPDATE {GOALS_TABLE}
+                SET parent_goal_id = $2, level = $3, updated_at = NOW()
+                WHERE id = $1
+                RETURNING {_GOAL_COLUMNS}
+                """,
+                goal_id,
+                new_parent_goal_id,
+                level,
+            )
+            return _row_to_goal_node(row)
+        finally:
+            if own:
+                await conn.close()
+
+    async def _require_goal_manageable(
+        self,
+        principal: Principal,
+        goal_id: str,
+        conn: "asyncpg.Connection",
+        *,
+        actor: GtsActor,
+        action: str,
+    ) -> GtsGoal:
+        goal = await self._get_goal_node(principal, goal_id, conn)
+        if goal is None:
+            raise PermissionError(
+                f"Goal {goal_id} not found or not visible to {principal.user_id}"
+            )
+        if goal.level == "top":
+            self._require_user(
+                actor,
+                principal.user_id,
+                action=f"{action} on a top-level goal",
+                target_kind="goal",
+                target_ref=goal_id,
+            )
+        return goal
+
+    async def _get_goal_node(
+        self,
+        principal: Principal,
+        goal_id: str,
+        conn: "asyncpg.Connection",
+    ) -> Optional[GtsGoal]:
+        predicate = scope_filter(principal, start_index=2)
+        row = await conn.fetchrow(
+            f"""
+            SELECT {_GOAL_COLUMNS} FROM {GOALS_TABLE}
+            WHERE id = $1 AND {predicate.sql}
+            """,
+            goal_id,
+            *predicate.params,
+        )
+        return _row_to_goal_node(row) if row is not None else None
+
+    async def _is_goal_descendant(
+        self,
+        conn: "asyncpg.Connection",
+        *,
+        ancestor: str,
+        candidate: str,
+    ) -> bool:
+        """True if ``candidate`` is ``ancestor`` or below it in the goal tree.
+
+        Walks up from ``candidate`` following ``parent_goal_id``; if we reach
+        ``ancestor`` then ``candidate`` sits inside ``ancestor``'s subtree.
+        Unscoped on purpose — cycle safety is a graph invariant, not a per-user
+        visibility question.
+        """
+        seen: set[str] = set()
+        node: Optional[str] = candidate
+        while node is not None:
+            if node == ancestor:
+                return True
+            if node in seen:
+                break
+            seen.add(node)
+            node = await conn.fetchval(
+                f"SELECT parent_goal_id FROM {GOALS_TABLE} WHERE id = $1",
+                node,
+            )
+            node = str(node) if node is not None else None
+        return False
+
+    # -- tasks -------------------------------------------------------------
+
+    async def create_task(
+        self,
+        principal: Principal,
+        spec: TaskSpec,
+        *,
+        actor: GtsActor = "user",
+        parent_task_id: Optional[str] = None,
+        priority: str = DEFAULT_GOAL_PRIORITY,
+        visibility: Optional[str] = None,
+        goal_ids: Optional[Sequence[str]] = None,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> GtsTask:
+        """Create a task or sub-task (the agent is allowed under a readable parent).
+
+        Optionally link the new task to one or more readable goals (M:N).
+        """
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            if parent_task_id is not None:
+                parent = await self._get_task_node(principal, parent_task_id, conn)
+                if parent is None:
+                    raise PermissionError(
+                        f"Parent task {parent_task_id} not found or not visible "
+                        f"to {principal.user_id}"
+                    )
+            record = await self._tasks.create_task(
+                principal,
+                spec,
+                visibility=visibility,
+                connection=conn,
+            )
+            row = await conn.fetchrow(
+                f"""
+                UPDATE {TASKS_TABLE}
+                SET parent_task_id = $2, priority = $3, updated_at = NOW()
+                WHERE id = $1
+                RETURNING {_TASK_COLUMNS}
+                """,
+                record.id,
+                parent_task_id,
+                normalize_priority(priority),
+            )
+            task = _row_to_task_node(row)
+            for goal_id in goal_ids or ():
+                await self._link_task_goal(principal, task.id, goal_id, conn)
+            self._audit(
+                actor=actor,
+                actor_user_id=principal.user_id,
+                action="create_task",
+                target_kind="task",
+                target_ref=task.id,
+                decision="recorded",
+                reason="created sub-task" if parent_task_id else "created task",
+            )
+            return task
+        finally:
+            if own:
+                await conn.close()
+
+    async def get_task(
+        self,
+        principal: Principal,
+        task_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> Optional[GtsTask]:
+        """Return the task node if ``principal`` may read it (C2), else None."""
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            return await self._get_task_node(principal, task_id, conn)
+        finally:
+            if own:
+                await conn.close()
+
+    async def reparent_task(
+        self,
+        principal: Principal,
+        task_id: str,
+        new_parent_task_id: Optional[str],
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> GtsTask:
+        """Move a task under a new parent task, cycle-safe."""
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            task = await self._get_task_node(principal, task_id, conn)
+            if task is None:
+                raise PermissionError(
+                    f"Task {task_id} not found or not visible to {principal.user_id}"
+                )
+            if new_parent_task_id is not None:
+                if new_parent_task_id == task_id:
+                    raise GtsCycleError("A task cannot be its own parent")
+                parent = await self._get_task_node(
+                    principal, new_parent_task_id, conn
+                )
+                if parent is None:
+                    raise PermissionError(
+                        f"Parent task {new_parent_task_id} not found or not "
+                        f"visible to {principal.user_id}"
+                    )
+                if await self._is_task_descendant(
+                    conn, ancestor=task_id, candidate=new_parent_task_id
+                ):
+                    raise GtsCycleError(
+                        f"Reparenting {task_id} under {new_parent_task_id} "
+                        "would create a cycle"
+                    )
+            row = await conn.fetchrow(
+                f"""
+                UPDATE {TASKS_TABLE}
+                SET parent_task_id = $2, updated_at = NOW()
+                WHERE id = $1
+                RETURNING {_TASK_COLUMNS}
+                """,
+                task_id,
+                new_parent_task_id,
+            )
+            return _row_to_task_node(row)
+        finally:
+            if own:
+                await conn.close()
+
+    async def _get_task_node(
+        self,
+        principal: Principal,
+        task_id: str,
+        conn: "asyncpg.Connection",
+    ) -> Optional[GtsTask]:
+        predicate = scope_filter(principal, start_index=2)
+        row = await conn.fetchrow(
+            f"""
+            SELECT {_TASK_COLUMNS} FROM {TASKS_TABLE}
+            WHERE id = $1 AND {predicate.sql}
+            """,
+            task_id,
+            *predicate.params,
+        )
+        return _row_to_task_node(row) if row is not None else None
+
+    async def _is_task_descendant(
+        self,
+        conn: "asyncpg.Connection",
+        *,
+        ancestor: str,
+        candidate: str,
+    ) -> bool:
+        seen: set[str] = set()
+        node: Optional[str] = candidate
+        while node is not None:
+            if node == ancestor:
+                return True
+            if node in seen:
+                break
+            seen.add(node)
+            node = await conn.fetchval(
+                f"SELECT parent_task_id FROM {TASKS_TABLE} WHERE id = $1",
+                node,
+            )
+            node = str(node) if node is not None else None
+        return False
+
+    # -- skills registry ---------------------------------------------------
+
+    async def register_skill(
+        self,
+        principal: Principal,
+        name: str,
+        skill_ref: str,
+        *,
+        visibility: Optional[str] = None,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> SkillNode:
+        """Register a skill *reference* node (points at existing skill content)."""
+        clean_name = (name or "").strip()
+        clean_ref = (skill_ref or "").strip()
+        if not clean_name:
+            raise ValueError("A skill node requires a name")
+        if not clean_ref:
+            raise ValueError("A skill node requires a skill_ref to existing content")
+        resolved_visibility = _resolve_visibility(principal, visibility)
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            row = await conn.fetchrow(
+                f"""
+                INSERT INTO {SKILLS_TABLE}
+                    (owner_user_id, visibility, name, skill_ref)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (owner_user_id, name) DO UPDATE SET
+                    skill_ref = EXCLUDED.skill_ref,
+                    visibility = EXCLUDED.visibility,
+                    updated_at = NOW()
+                RETURNING id, owner_user_id, visibility, name, skill_ref
+                """,
+                principal.user_id,
+                resolved_visibility,
+                clean_name,
+                clean_ref,
+            )
+            return _row_to_skill(row)
+        finally:
+            if own:
+                await conn.close()
+
+    async def list_skills(
+        self,
+        principal: Principal,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> List[SkillNode]:
+        """List skill nodes ``principal`` may read (C2)."""
+        predicate = scope_filter(principal, start_index=1)
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            rows = await conn.fetch(
+                f"""
+                SELECT id, owner_user_id, visibility, name, skill_ref
+                FROM {SKILLS_TABLE}
+                WHERE {predicate.sql}
+                ORDER BY name
+                """,
+                *predicate.params,
+            )
+            return [_row_to_skill(r) for r in rows]
+        finally:
+            if own:
+                await conn.close()
+
+    # -- M:N edges ---------------------------------------------------------
+
+    async def link_task_to_goal(
+        self,
+        principal: Principal,
+        task_id: str,
+        goal_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> None:
+        """Associate a task with a goal (M:N). Both must be readable by C2."""
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            await self._link_task_goal(principal, task_id, goal_id, conn)
+        finally:
+            if own:
+                await conn.close()
+
+    async def _link_task_goal(
+        self,
+        principal: Principal,
+        task_id: str,
+        goal_id: str,
+        conn: "asyncpg.Connection",
+    ) -> None:
+        if await self._get_task_node(principal, task_id, conn) is None:
+            raise PermissionError(
+                f"Task {task_id} not found or not visible to {principal.user_id}"
+            )
+        if await self._get_goal_node(principal, goal_id, conn) is None:
+            raise PermissionError(
+                f"Goal {goal_id} not found or not visible to {principal.user_id}"
+            )
+        await conn.execute(
+            f"""
+            INSERT INTO {TASK_GOALS_TABLE} (task_id, goal_id)
+            VALUES ($1, $2)
+            ON CONFLICT DO NOTHING
+            """,
+            task_id,
+            goal_id,
+        )
+
+    async def unlink_task_from_goal(
+        self,
+        principal: Principal,
+        task_id: str,
+        goal_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> None:
+        """Remove a task↔goal association (both must be readable)."""
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            if await self._get_task_node(principal, task_id, conn) is None:
+                raise PermissionError(
+                    f"Task {task_id} not found or not visible to {principal.user_id}"
+                )
+            await conn.execute(
+                f"DELETE FROM {TASK_GOALS_TABLE} WHERE task_id = $1 AND goal_id = $2",
+                task_id,
+                goal_id,
+            )
+        finally:
+            if own:
+                await conn.close()
+
+    async def goals_for_task(
+        self,
+        principal: Principal,
+        task_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> List[GtsGoal]:
+        """Goals linked to a task, restricted to those ``principal`` may read."""
+        predicate = scope_filter(principal, column="g.visibility", start_index=2)
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            if await self._get_task_node(principal, task_id, conn) is None:
+                return []
+            rows = await conn.fetch(
+                f"""
+                SELECT {_goal_columns_prefixed("g")}
+                FROM {TASK_GOALS_TABLE} tg
+                JOIN {GOALS_TABLE} g ON g.id = tg.goal_id
+                WHERE tg.task_id = $1 AND {predicate.sql}
+                """,
+                task_id,
+                *predicate.params,
+            )
+            return [_row_to_goal_node(r) for r in rows]
+        finally:
+            if own:
+                await conn.close()
+
+    async def link_task_to_skill(
+        self,
+        principal: Principal,
+        task_id: str,
+        skill_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> None:
+        """Associate a task with a registered skill (M:N). Both readable by C2."""
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            if await self._get_task_node(principal, task_id, conn) is None:
+                raise PermissionError(
+                    f"Task {task_id} not found or not visible to {principal.user_id}"
+                )
+            skill = await conn.fetchval(
+                f"""
+                SELECT id FROM {SKILLS_TABLE}
+                WHERE id = $1 AND {scope_filter(principal, start_index=2).sql}
+                """,
+                skill_id,
+                *scope_filter(principal, start_index=2).params,
+            )
+            if skill is None:
+                raise PermissionError(
+                    f"Skill {skill_id} not found or not visible to "
+                    f"{principal.user_id}"
+                )
+            await conn.execute(
+                f"""
+                INSERT INTO {TASK_SKILLS_TABLE} (task_id, skill_id)
+                VALUES ($1, $2)
+                ON CONFLICT DO NOTHING
+                """,
+                task_id,
+                skill_id,
+            )
+        finally:
+            if own:
+                await conn.close()
+
+    async def skills_for_task(
+        self,
+        principal: Principal,
+        task_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> List[SkillNode]:
+        """Skills linked to a task, restricted to those ``principal`` may read."""
+        predicate = scope_filter(principal, column="s.visibility", start_index=2)
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            if await self._get_task_node(principal, task_id, conn) is None:
+                return []
+            rows = await conn.fetch(
+                f"""
+                SELECT s.id, s.owner_user_id, s.visibility, s.name, s.skill_ref
+                FROM {TASK_SKILLS_TABLE} ts
+                JOIN {SKILLS_TABLE} s ON s.id = ts.skill_id
+                WHERE ts.task_id = $1 AND {predicate.sql}
+                ORDER BY s.name
+                """,
+                task_id,
+                *predicate.params,
+            )
+            return [_row_to_skill(r) for r in rows]
+        finally:
+            if own:
+                await conn.close()
+
+    # -- evaluation methods (user-only, agent-immutable) -------------------
+
+    async def set_evaluation_method(
+        self,
+        principal: Principal,
+        target_kind: str,
+        target_id: str,
+        method: Mapping[str, object],
+        *,
+        actor: GtsActor = "user",
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> EvaluationMethod:
+        """Set/replace the evaluation method for a goal or task — **user only**.
+
+        The runtime agent is refused and audited (C5/C8): the method governs
+        *how* a node scores and is a Core-protected field (C7/C9). The agent may
+        still record measurements/progress, which does not touch the method.
+        """
+        if target_kind not in _TARGET_KINDS:
+            raise ValueError(f"Unknown evaluation target_kind: {target_kind!r}")
+        self._require_user(
+            actor,
+            principal.user_id,
+            action="set an evaluation method",
+            target_kind=target_kind,
+            target_ref=target_id,
+        )
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            await self._require_target_readable(
+                principal, target_kind, target_id, conn
+            )
+            row = await conn.fetchrow(
+                f"""
+                INSERT INTO {EVALUATION_METHODS_TABLE}
+                    (target_kind, target_id, method_json, set_by_user_id, locked)
+                VALUES ($1, $2, $3::jsonb, $4, TRUE)
+                ON CONFLICT (target_kind, target_id) DO UPDATE SET
+                    method_json = EXCLUDED.method_json,
+                    set_by_user_id = EXCLUDED.set_by_user_id,
+                    updated_at = NOW()
+                RETURNING id, target_kind, target_id, method_json,
+                          set_by_user_id, locked
+                """,
+                target_kind,
+                target_id,
+                json.dumps(dict(method), sort_keys=True),
+                principal.user_id,
+            )
+            table = GOALS_TABLE if target_kind == "goal" else TASKS_TABLE
+            await conn.execute(
+                f"UPDATE {table} SET evaluation_method_ref = $2 WHERE id = $1",
+                target_id,
+                row["id"],
+            )
+            self._audit(
+                actor=actor,
+                actor_user_id=principal.user_id,
+                action="set_evaluation_method",
+                target_kind=target_kind,
+                target_ref=target_id,
+                decision="recorded",
+                reason="user set the evaluation method",
+            )
+            return _row_to_method(row)
+        finally:
+            if own:
+                await conn.close()
+
+    async def get_evaluation_method(
+        self,
+        principal: Principal,
+        target_kind: str,
+        target_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> Optional[EvaluationMethod]:
+        """Return the evaluation method for a readable goal/task, if any."""
+        if target_kind not in _TARGET_KINDS:
+            raise ValueError(f"Unknown evaluation target_kind: {target_kind!r}")
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            if (
+                await self._target_readable(principal, target_kind, target_id, conn)
+                is False
+            ):
+                return None
+            row = await conn.fetchrow(
+                f"""
+                SELECT id, target_kind, target_id, method_json,
+                       set_by_user_id, locked
+                FROM {EVALUATION_METHODS_TABLE}
+                WHERE target_kind = $1 AND target_id = $2
+                """,
+                target_kind,
+                target_id,
+            )
+            return _row_to_method(row) if row is not None else None
+        finally:
+            if own:
+                await conn.close()
+
+    async def _require_target_readable(
+        self,
+        principal: Principal,
+        target_kind: str,
+        target_id: str,
+        conn: "asyncpg.Connection",
+    ) -> None:
+        if not await self._target_readable(principal, target_kind, target_id, conn):
+            raise PermissionError(
+                f"{target_kind} {target_id} not found or not visible to "
+                f"{principal.user_id}"
+            )
+
+    async def _target_readable(
+        self,
+        principal: Principal,
+        target_kind: str,
+        target_id: str,
+        conn: "asyncpg.Connection",
+    ) -> bool:
+        if target_kind == "goal":
+            return await self._get_goal_node(principal, target_id, conn) is not None
+        return await self._get_task_node(principal, target_id, conn) is not None
+
+    # -- scoring (always computed; clamped; rolled up) ---------------------
+
+    async def recompute_goal_score(
+        self,
+        principal: Principal,
+        goal_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> float:
+        """Recompute + persist a goal's score bottom-up and return it.
+
+        A goal with sub-goals rolls their (recomputed) scores up by priority
+        weight; a leaf goal scores from its FG-04 metrics under the user's
+        evaluation-method weights. Always clamped to ``[0, 100]``; never
+        hand-set.
+        """
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            return await self._recompute_goal_score(principal, goal_id, conn)
+        finally:
+            if own:
+                await conn.close()
+
+    async def _recompute_goal_score(
+        self,
+        principal: Principal,
+        goal_id: str,
+        conn: "asyncpg.Connection",
+    ) -> float:
+        goal = await self._get_goal_node(principal, goal_id, conn)
+        if goal is None:
+            raise PermissionError(
+                f"Goal {goal_id} not found or not visible to {principal.user_id}"
+            )
+        children = await self.list_goals(
+            principal, parent_goal_id=goal_id, connection=conn
+        )
+        if children:
+            child_scores: List[Tuple[float, str]] = []
+            for child in children:
+                child_score = await self._recompute_goal_score(
+                    principal, child.id, conn
+                )
+                child_scores.append((child_score, child.priority))
+            score = rollup_score(child_scores)
+        else:
+            metrics = await self._goals.list_metrics(
+                principal, goal_id, connection=conn
+            )
+            weights = _method_weights(
+                await self._method_json(conn, "goal", goal_id)
+            )
+            score = score_from_metrics(metrics, weights=weights)
+        await conn.execute(
+            f"UPDATE {GOALS_TABLE} SET score = $2 WHERE id = $1",
+            goal_id,
+            score,
+        )
+        return score
+
+    async def recompute_task_score(
+        self,
+        principal: Principal,
+        task_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> float:
+        """Recompute + persist a task's score bottom-up and return it.
+
+        A task with sub-tasks rolls their scores up by priority weight; a leaf
+        task scores from its FG-06 progress state (under any user-supplied
+        ``state_scores`` rubric). Always clamped; never hand-set.
+        """
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            return await self._recompute_task_score(principal, task_id, conn)
+        finally:
+            if own:
+                await conn.close()
+
+    async def _recompute_task_score(
+        self,
+        principal: Principal,
+        task_id: str,
+        conn: "asyncpg.Connection",
+    ) -> float:
+        task = await self._get_task_node(principal, task_id, conn)
+        if task is None:
+            raise PermissionError(
+                f"Task {task_id} not found or not visible to {principal.user_id}"
+            )
+        children = await conn.fetch(
+            f"SELECT id FROM {TASKS_TABLE} WHERE parent_task_id = $1",
+            task_id,
+        )
+        if children:
+            child_scores: List[Tuple[float, str]] = []
+            for row in children:
+                child = await self._get_task_node(principal, str(row["id"]), conn)
+                if child is None:
+                    continue
+                child_score = await self._recompute_task_score(
+                    principal, child.id, conn
+                )
+                child_scores.append((child_score, child.priority))
+            score = rollup_score(child_scores)
+        else:
+            progress_states = await self._tasks.progress_states(
+                principal, task_id, connection=conn
+            )
+            state_scores = _method_state_scores(
+                await self._method_json(conn, "task", task_id)
+            )
+            score = score_from_progress(
+                progress_states,
+                task.current_state,
+                task.completion_state,
+                status=task.status,
+                state_scores=state_scores,
+            )
+        await conn.execute(
+            f"UPDATE {TASKS_TABLE} SET score = $2 WHERE id = $1",
+            task_id,
+            score,
+        )
+        return score
+
+    async def goal_verdict(
+        self,
+        principal: Principal,
+        goal_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> Tuple[str, str]:
+        """Reuse FG-04 ``verdict_for_metrics`` over a goal's stored metrics."""
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            metrics = await self._goals.list_metrics(
+                principal, goal_id, connection=conn
+            )
+            return verdict_for_metrics(metrics)
+        finally:
+            if own:
+                await conn.close()
+
+    async def _method_json(
+        self,
+        conn: "asyncpg.Connection",
+        target_kind: str,
+        target_id: str,
+    ) -> Mapping[str, object]:
+        raw = await conn.fetchval(
+            f"""
+            SELECT method_json FROM {EVALUATION_METHODS_TABLE}
+            WHERE target_kind = $1 AND target_id = $2
+            """,
+            target_kind,
+            target_id,
+        )
+        return _load_method(raw)
+
+
+# ---------------------------------------------------------------------------
+# Row mappers + column lists
+# ---------------------------------------------------------------------------
+
+_GOAL_COLUMNS = (
+    "id, owner_user_id, visibility, title, priority, status, "
+    "level, parent_goal_id, score, evaluation_method_ref"
+)
+
+_TASK_COLUMNS = (
+    "id, owner_user_id, visibility, title, priority, status, "
+    "current_state, completion_state, parent_task_id, score, "
+    "evaluation_method_ref"
+)
+
+
+def _goal_columns_prefixed(alias: str) -> str:
+    return ", ".join(f"{alias}.{col.strip()}" for col in _GOAL_COLUMNS.split(","))
+
+
+def _row_to_goal_node(row: "asyncpg.Record") -> GtsGoal:
+    score = row["score"]
+    parent = row["parent_goal_id"]
+    method_ref = row["evaluation_method_ref"]
+    return GtsGoal(
+        id=str(row["id"]),
+        owner_user_id=str(row["owner_user_id"]),
+        visibility=str(row["visibility"]),
+        title=str(row["title"]),
+        priority=str(row["priority"]),
+        status=str(row["status"]),
+        level=str(row["level"]),
+        parent_goal_id=str(parent) if parent is not None else None,
+        score=float(score) if score is not None else None,
+        evaluation_method_ref=str(method_ref) if method_ref is not None else None,
+    )
+
+
+def _row_to_task_node(row: "asyncpg.Record") -> GtsTask:
+    score = row["score"]
+    parent = row["parent_task_id"]
+    method_ref = row["evaluation_method_ref"]
+    return GtsTask(
+        id=str(row["id"]),
+        owner_user_id=str(row["owner_user_id"]),
+        visibility=str(row["visibility"]),
+        title=str(row["title"]),
+        priority=str(row["priority"]),
+        status=str(row["status"]),
+        current_state=str(row["current_state"]),
+        completion_state=str(row["completion_state"]),
+        parent_task_id=str(parent) if parent is not None else None,
+        score=float(score) if score is not None else None,
+        evaluation_method_ref=str(method_ref) if method_ref is not None else None,
+    )
+
+
+def _row_to_skill(row: "asyncpg.Record") -> SkillNode:
+    return SkillNode(
+        id=str(row["id"]),
+        owner_user_id=str(row["owner_user_id"]),
+        visibility=str(row["visibility"]),
+        name=str(row["name"]),
+        skill_ref=str(row["skill_ref"]),
+    )
+
+
+def _row_to_method(row: "asyncpg.Record") -> EvaluationMethod:
+    return EvaluationMethod(
+        id=str(row["id"]),
+        target_kind=str(row["target_kind"]),
+        target_id=str(row["target_id"]),
+        method=_load_method(row["method_json"]),
+        set_by_user_id=str(row["set_by_user_id"]),
+        locked=bool(row["locked"]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_visibility(principal: Principal, visibility: Optional[str]) -> str:
+    """Map a ``shared``/``private`` intent onto a concrete C2 tag (own private)."""
+    if visibility is None or visibility == "private":
+        return principal.private_visibility
+    return normalize_visibility(visibility)
+
+
+def _load_method(raw: object) -> Dict[str, object]:
+    if raw is None:
+        return {}
+    if isinstance(raw, (str, bytes, bytearray)):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+    if isinstance(raw, Mapping):
+        return {str(key): value for key, value in raw.items()}
+    return {}
+
+
+def _as_float(value: object) -> Optional[float]:
+    """Coerce a JSON scalar to ``float``; return ``None`` for anything else."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _method_weights(method: Mapping[str, object]) -> Dict[str, float]:
+    weights = method.get("weights")
+    if not isinstance(weights, Mapping):
+        return {}
+    resolved: Dict[str, float] = {}
+    for name, value in weights.items():
+        number = _as_float(value)
+        if number is not None:
+            resolved[str(name)] = number
+    return resolved
+
+
+def _method_state_scores(method: Mapping[str, object]) -> Dict[str, float]:
+    scores = method.get("state_scores")
+    if not isinstance(scores, Mapping):
+        return {}
+    resolved: Dict[str, float] = {}
+    for state, value in scores.items():
+        number = _as_float(value)
+        if number is not None:
+            resolved[str(state)] = number
+    return resolved
+
+
+def gts_audit_log_path() -> Path:
+    """Path of the durable, append-only local GTS-authority audit log (JSONL)."""
+    try:
+        from hermes_constants import get_hermes_home
+
+        home = Path(get_hermes_home())
+    except Exception:
+        home = Path(os.path.expanduser("~/.hermes"))
+    return home / "audit" / "gts_authority.jsonl"
+
+
+def _append_local_audit(event: GtsAuditEvent) -> None:
+    """Best-effort durable audit — always written, never raises into a mutation."""
+    try:
+        path = gts_audit_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event.as_dict(), sort_keys=True) + "\n")
+    except Exception:
+        pass
+
+
+__all__ = [
+    "EVALUATION_METHODS_TABLE",
+    "GOAL_LEVELS",
+    "SKILLS_TABLE",
+    "TASK_GOALS_TABLE",
+    "TASK_SKILLS_TABLE",
+    "EvaluationMethod",
+    "GtsActor",
+    "GtsAuditEvent",
+    "GtsAuthorityError",
+    "GtsCentre",
+    "GtsCycleError",
+    "GtsError",
+    "GtsGoal",
+    "GtsTask",
+    "SkillNode",
+    "clamp_score",
+    "gts_audit_log_path",
+    "render_gts_block",
+    "rollup_score",
+    "score_from_metrics",
+    "score_from_progress",
+]

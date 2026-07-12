@@ -1,6 +1,6 @@
 # FG-18 — GTS Centre (Goals → Tasks → Skills)
 
-**Wave:** B (Phase-2) · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** B (Phase-2) · **Owner agent:** devin:b9d4f38f (for Leo) · **Status:** Implemented (code + tests green); ECS system-test box + prod promotion pending (gated, owned by Leo)
 
 ## Summary
 A first-class dashboard surface — the **GTS Centre** — that helps a user
@@ -98,18 +98,19 @@ GTS data in `app_*` via C3; the Ralph execution loop stays in SQLite core
 Tests green (incl. authority + cycle + score/rollup + cache-safety + negative access) + baseline green + `ruff`/`ty` clean; unifies FG-04/06/skills with M:N + hierarchy + priorities; top-level goals + evaluation methods are user-only (agent refused + audited); scores auto-computed/clamped/rolled-up; GTS engine is Core (C7); **ECS system test green**.
 
 ## Progress checklist
-- [ ] C9 unified graph over FG-04 goals + FG-06 tasks + skills (parent hierarchy; M:N `task_goals`/`task_skills`)
-- [ ] Authority model (user-only top-level goals + evaluation methods; agent sub-goals/tasks; refusals audited)
-- [ ] Auto-score (0–100, clamped, computed) + priority-weighted rollup
-- [ ] Cycle prevention + priority ordering + incomplete/blocked/cancelled/archived states
-- [ ] Cache-safe surfacing (tool results/appended messages only)
-- [ ] tests (baseline + unit + authority + negative + E2E + cache-safety) green
-- [ ] System test on the system-test ECS passed (see *System testing* section)
+- [x] C9 unified graph over FG-04 goals + FG-06 tasks + skills (parent hierarchy; M:N `task_goals`/`task_skills`) — `hermes_cli/gts.py` (`GtsCentre`), extending `goal_registry`/`task_registry`; adds `skills_registry`, `task_goals`, `task_skills`, `evaluation_methods`.
+- [x] Authority model (user-only top-level goals + evaluation methods; agent sub-goals/tasks; refusals audited) — fail-closed `GtsActor` guard; refusals emit C8 `core_denied` + a durable `<HERMES_HOME>/audit/gts_authority.jsonl` row + optional C5 sink.
+- [x] Auto-score (0–100, clamped, computed) + priority-weighted rollup — `score_from_metrics`/`score_from_progress`/`rollup_score`; reuses `GoalMetric.progress_fraction`, `priority_weight`, `verdict_for_metrics`.
+- [x] Cycle prevention + priority ordering + incomplete/blocked/cancelled/archived states — ancestor-walk cycle guard on reparent; priority-ordered listing; FG-04/06 states preserved.
+- [x] Cache-safe surfacing (tool results/appended messages only) — `render_gts_block` (append-only, byte-stable); no API mutates the system prompt.
+- [x] tests (baseline + unit + authority + negative + E2E + cache-safety) green — `tests/hermes_cli/test_gts.py` (unit) + `test_gts_e2e.py` (real-Postgres); baseline + goal/task/access/core-boundary suites green; `ruff`/`ty` clean on the new module.
+- [ ] System test on the system-test ECS passed (see *System testing* section) — **separate gated step owned by Leo/requester; NOT run in this session.**
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-12 | 1 | devin:8cec0d47 (for Leo) | Created FG doc | Phase-2 req 18.0: GTS Centre as a Core tool unifying goals/tasks/skills (M:N, hierarchy, priorities, user-only top goals + eval methods, auto-score) |
+| 2026-07-12 | 2 | devin:b9d4f38f (for Leo) | Implemented C9 GTS Centre (`hermes_cli/gts.py`) extending FG-04/06 + skills; added authority model, cycle-safe hierarchy, M:N edges, `skills_registry`/`evaluation_methods`, computed+clamped scores with priority-weighted rollup, cache-safe surfacing; marked the engine Core in `core_manifest.yaml` + `agent/core_boundary.py`; added unit + real-Postgres E2E tests | Deliver the GTS Centre per this spec's Design/Testing/DoD. ECS system-test box + prod promotion remain separate gated steps owned by Leo (not run here). |
 
 ## Cloud-agent prompt
 > **[Phase-2 Wave B — start after FG-04/FG-06/FG-01/FG-12/FG-13 (Phase-1) merged + FG-14 C7]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-18`). Build the **GTS Centre** by **extending** FG-04 (`hermes_cli/goal_registry.py`, `goals.py`) + FG-06 (`tasks`/kanban/todo) + existing skills — **do NOT create a new goal/task store**. Publish contract **C9**: a unified graph with **hierarchical** goals + tasks (`parent_*_id`, cycle-safe), **priorities**, **M:N** `task_goals` and `task_skills`, and a `skills_registry` referencing existing skill content. Enforce the **authority model**: **only the user** creates/manages **top-level goals** and **evaluation methods** (agent refused + audited via C5/C8); the **agent may** create sub-goals/tasks/sub-tasks under an authorized parent (side-effecting ones ride C6). Each goal/task has a **user-defined evaluation method** and an **auto-computed score clamped 0–100** (never hand-set), with a **priority-weighted rollup** from children to parent — reuse FG-04's `GoalMetric`/`verdict_for_metrics`. The GTS engine + evaluation-method fields are **Core (C7)**. Surface GTS state to the agent **only via tool results / appended messages — never mutate the system prompt** (cache sacred). Route via C3; scope via C2 (owner sees all). Follow `AGENTS.md` (extend-don't-duplicate, footprint ladder). Keep `tests/plan_baseline/` green; add unit + authority + cycle + score/rollup + negative-access + cache-safety + real-Postgres E2E tests (temp `HERMES_HOME` + throwaway Postgres); run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist passes** — coordinate with Leo.

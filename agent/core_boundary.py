@@ -71,6 +71,7 @@ _FALLBACK_CORE_GLOBS: tuple[str, ...] = (
     "hermes_cli/goal_registry.py",
     "hermes_cli/goals.py",
     "hermes_cli/task_registry.py",
+    "hermes_cli/gts.py",
     "agent/core_boundary.py",
     "core_manifest.yaml",
 )
