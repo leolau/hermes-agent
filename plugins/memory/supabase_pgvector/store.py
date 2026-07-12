@@ -149,20 +149,53 @@ class PgvectorMemoryStore:
     def dim(self) -> int:
         return self._embedder.dim
 
-    async def _connect(self) -> "asyncpg.Connection":
-        connection = await self._store.connect()
+    async def _prepare_connection(
+        self, connection: "asyncpg.Connection"
+    ) -> "asyncpg.Connection":
+        """Make ``vector`` usable on ``connection`` (own or caller-injected).
+
+        pgvector may be installed in a schema other than the app schema (a
+        standard self-hosted Supabase installs it into ``public``). The
+        ``vector`` type, its cast, the ``<=>`` operator, and the ``hnsw``
+        ``vector_cosine_ops`` opclass only resolve when that schema is on the
+        search path, and the asyncpg codec must be registered against the
+        schema the type actually lives in — otherwise the connection fails
+        with ``type "vector" does not exist`` / ``operator class ... does not
+        exist`` even though the extension is present. This runs on *every*
+        connection the store touches — including one handed in by a caller
+        such as :class:`GoalManagementService` — so no code path can end up
+        with the app schema pinned but the vector schema missing. Idempotent.
+        """
         await connection.execute(
             f'CREATE SCHEMA IF NOT EXISTS "{self._store.schema}"'
         )
         await connection.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        # Keep the app schema first so scoped tables/RLS still land there.
+        vector_schema = await connection.fetchval(
+            """
+            SELECT n.nspname
+            FROM pg_extension e
+            JOIN pg_namespace n ON n.oid = e.extnamespace
+            WHERE e.extname = 'vector'
+            """
+        ) or self._store.schema
+        if vector_schema != self._store.schema:
+            await connection.execute(
+                "SELECT set_config('search_path', $1, false)",
+                f'"{self._store.schema}", "{vector_schema}"',
+            )
         await connection.set_type_codec(
             "vector",
-            schema=self._store.schema,
+            schema=vector_schema,
             encoder=_encode_vector,
             decoder=_decode_vector,
             format="text",
         )
         return connection
+
+    async def _connect(self) -> "asyncpg.Connection":
+        connection = await self._store.connect()
+        return await self._prepare_connection(connection)
 
     async def initialize(
         self,
@@ -176,6 +209,8 @@ class PgvectorMemoryStore:
         own = connection is None
         conn = connection or await self._connect()
         try:
+            if not own:
+                await self._prepare_connection(conn)
             await conn.execute(_schema_sql(self.dim))
             await apply_scope_rls(conn, MEMORY_TABLE)
         finally:
@@ -208,6 +243,8 @@ class PgvectorMemoryStore:
         own = connection is None
         conn = connection or await self._connect()
         try:
+            if not own:
+                await self._prepare_connection(conn)
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO {MEMORY_TABLE}
@@ -242,6 +279,8 @@ class PgvectorMemoryStore:
         own = connection is None
         conn = connection or await self._connect()
         try:
+            if not own:
+                await self._prepare_connection(conn)
             row = await conn.fetchrow(
                 f"""
                 SELECT id, owner_user_id, visibility, kind, text, topic,
@@ -306,6 +345,8 @@ class PgvectorMemoryStore:
         own = connection is None
         conn = connection or await self._connect()
         try:
+            if not own:
+                await self._prepare_connection(conn)
             rows = await conn.fetch(sql, *params)
             return [_row_to_record(row) for row in rows]
         finally:

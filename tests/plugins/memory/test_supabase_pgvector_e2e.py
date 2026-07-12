@@ -236,3 +236,99 @@ async def test_concurrent_sessions_no_lost_writes_no_cross_bleed(
         )
         assert len(rows) == per_writer
         assert all(r.owner_user_id == f"user{i}" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_initializes_when_vector_extension_lives_in_another_schema(
+    postgres_dsn: str,
+) -> None:
+    """Real-Supabase layout: ``vector`` in ``public`` while app data is in ``app_dev``.
+
+    A standard self-hosted Supabase installs the ``vector`` extension into the
+    ``public`` schema, but contract C3 pins each connection's ``search_path`` to
+    the app schema (``app_dev``/``app_prod``). The store must still resolve the
+    ``vector`` type, its input cast, and the ``<=>`` operator. Regression for the
+    crash ``type "vector" does not exist`` on ``store.initialize()`` (and every
+    write/query) that only surfaces when the extension is NOT in the app schema —
+    which the other tests never hit because ``_connect`` created it inside the
+    app schema under the pinned search_path.
+    """
+    await _reset(postgres_dsn)
+    # Force the extension to live ONLY in public, mirroring a real Supabase box.
+    conn = await asyncpg.connect(postgres_dsn, ssl=False)
+    try:
+        await conn.execute("DROP EXTENSION IF EXISTS vector CASCADE")
+        await conn.execute("CREATE EXTENSION vector SCHEMA public")
+        located = await conn.fetchval(
+            "SELECT n.nspname FROM pg_extension e "
+            "JOIN pg_namespace n ON n.oid = e.extnamespace "
+            "WHERE e.extname = 'vector'"
+        )
+        assert located == "public"
+    finally:
+        await conn.close()
+
+    store = _store(postgres_dsn)
+    # Before the fix this raises asyncpg: type "vector" does not exist.
+    await store.initialize()
+    alice = Principal(user_id="alice", display="Alice", role="member")
+    await store.write(
+        alice, "vector lives in public but semantic recall still works", topic="ext"
+    )
+    hits = await store.query(alice, "does recall work when pgvector is elsewhere")
+    assert hits and "recall still works" in hits[0].text
+    # The scoped table itself must still be created in the app schema, not public.
+    conn = await asyncpg.connect(postgres_dsn, ssl=False)
+    try:
+        table_schema = await conn.fetchval(
+            "SELECT table_schema FROM information_schema.tables "
+            "WHERE table_name = $1 AND table_schema = 'app_dev'",
+            MEMORY_TABLE,
+        )
+        assert table_schema == "app_dev"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_initialize_with_caller_injected_connection_when_vector_elsewhere(
+    postgres_dsn: str,
+) -> None:
+    """A caller-injected connection must still make ``vector`` usable.
+
+    :class:`hermes_cli.goal_management.GoalManagementService.initialize` opens
+    one C3 connection (``search_path`` pinned to ``app_dev``) and hands it to
+    ``memory.initialize(connection=...)``, ``write``, etc. That bypasses
+    ``_connect``'s vector-schema resolution, so on a real Supabase (extension
+    in ``public``) the ``hnsw`` index build fails with ``operator class
+    "vector_cosine_ops" does not exist`` — and every subsequent write/query
+    with the same injected connection would fail too. The store must prepare
+    the vector type/opclass/codec on the injected connection as well. Regression
+    for that integrated-path crash.
+    """
+    await _reset(postgres_dsn)
+    conn = await asyncpg.connect(postgres_dsn, ssl=False)
+    try:
+        await conn.execute("DROP EXTENSION IF EXISTS vector CASCADE")
+        await conn.execute("CREATE EXTENSION vector SCHEMA public")
+    finally:
+        await conn.close()
+
+    store = _store(postgres_dsn)
+    # Mirror GoalManagementService: a raw store connection pinned to app_dev,
+    # NOT the store's own prepared connection, handed in to every call.
+    injected = await store._store.connect()
+    try:
+        # Before the fix: operator class "vector_cosine_ops" does not exist.
+        await store.initialize(connection=injected)
+        alice = Principal(user_id="alice", display="Alice", role="member")
+        written = await store.write(
+            alice, "integrated path recall works", topic="ext", connection=injected
+        )
+        assert written.id
+        hits = await store.query(
+            alice, "does the injected-connection path recall", connection=injected
+        )
+        assert hits and "integrated path recall" in hits[0].text
+    finally:
+        await injected.close()
