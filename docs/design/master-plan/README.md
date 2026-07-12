@@ -268,6 +268,12 @@ transient, and in-place-resize to 8/32 (same-family, ~5 min, no data migration
 - **ERC-721 irreversibility** (D6) is explicitly outside undo (12.1).
 - **`alibabacloud` MCP server currently fails to init** — infra used the
   `aliyun` CLI instead; flagged separately.
+- **FG-03 live-gateway wiring OUTSTANDING** — the one-brain `InboundRouter` +
+  producers merged as a tested contract, but `gateway/run.py` does not yet route
+  channels through them, so multi-channel one-brain / per-user isolation is not
+  active at runtime. Only Telegram was live-tested; WhatsApp/email need the
+  migration + creds. Executable spec + checklist: *Gateway migration* in
+  `feature-groups/FG-03-multi-channel-redesign.md`.
 
 ---
 
@@ -277,5 +283,6 @@ transient, and in-place-resize to 8/32 (same-family, ~5 min, no data migration
 |------|---------|--------|-------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 (for Leo) | all | Initial master plan + 13 FG docs + baseline tests | Kickoff of the 13-FG build-out; decisions D1–D9 locked in planning session |
 | 2026-07-11 | 2 | devin:8cec0d47 (for Leo) | testing | Added §7.1 + a "System testing" section to every FG doc, as a required Definition-of-Done step after each FG's development | Leo: use a dedicated ai-prentice ECS as the system-test host, exercised after every feature group's development (per-FG, not a single post-all-waves pass) |
+| 2026-07-12 | 5 | devin:8cec0d47 (for Leo) | FG-03 | Documented the outstanding **gateway migration** (Shape-1 `InboundRouter`/producers → live `gateway/run.py`) as an executable checklist in FG-03; added a §8 open item. Clarified WhatsApp/email are not yet live at runtime (only Telegram was live-tested) | Leo: migrate the live gateway to the one-brain router first, then live WhatsApp/email round-trips; make it followable/verifiable by future agents |
 | 2026-07-11 | 3 | devin:8cec0d47 (for Leo) | infra/testing | System-test host = a **new** 4/16 ECS (`hermes-systest`, `i-j6c81aisv2dd8mg17yle`, EIP `47.83.199.25`, 100 GB ESSD at `/opt/data`), which also hosts prod for now (`app_staging` vs `app_prod` schemas + separate SQLite cores via C3); retitled the FG section to "System testing (system-test box)" | Leo: the existing 2/4 box is too small for the new self-hosted-Supabase design; provisioned the new box and pointed system testing (and, for now, prod) at it |
 | 2026-07-11 | 4 | devin:8cec0d47 (for Leo) | scope | **FG-02 (blockchain DID + ERC-721) put ON HOLD** — removed from the Wave-2 schedule; will not be launched until the owner explicitly resumes it. All other FGs proceed. | Leo: hold the blockchain implementation but go ahead with the rest. FG-02 has no downstream dependents, so holding it blocks nothing. |

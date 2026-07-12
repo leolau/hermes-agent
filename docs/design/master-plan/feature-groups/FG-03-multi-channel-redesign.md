@@ -1,6 +1,6 @@
 # FG-03 — Multi-channel redesign (one brain, all channels)
 
-**Wave:** 1 · **Owner agent:** devin:733e4888 · **Status:** In review (PR open into `develop`; ECS system-test pending owner coordination)
+**Wave:** 1 · **Owner agent:** devin:733e4888 · **Status:** Contract + Shape-1 merged; **live-gateway wiring (Shape-1→`gateway/run.py`) OUTSTANDING** — see *Gateway migration* below. Telegram live-tested; WhatsApp/email live round-trip pending the migration + creds.
 
 ## Summary
 Route **every** incoming channel (N WhatsApp numbers, N emails, N calendars, …)
@@ -35,6 +35,54 @@ is the execution wrapper.
    Shape 1 proves out.
 4. **Calendar = cron/heartbeat producer** into the same queue.
 5. **Channels are PROD-ONLY** (D5/C3 guard).
+
+## Gateway migration (Shape-1 → live `gateway/run.py`) — REQUIRED follow-up
+**Status: OUTSTANDING.** Shape-1 landed the router/producers as a *contract with
+tests* (`gateway/inbound.py` `InboundRouter`, `gateway/producers.py`), but the
+**live gateway `gateway/run.py` does not yet feed channels through it** — real
+WhatsApp/email traffic still runs the legacy per-platform path, so the
+"one brain, all channels, isolated per internal user" behaviour is **not active
+at runtime**. This section is the executable spec for finishing it; a future
+agent can follow and verify each item.
+
+**Goal:** the running gateway ingests every channel (Telegram, WhatsApp, email,
+…) as an `InboundEvent` via the thin producers, routes it through
+`InboundRouter` (C4 `session_key = f(channel, account_id, internal_user, task)`
++ C1 principal binding + C3 channel-prod guard), and egresses replies via the
+receiving `account_id`.
+
+**Verifiable checklist (Definition of Done for the migration):**
+- [ ] `gateway/run.py` imports and constructs a single `InboundRouter` (with the
+      `PrincipalStore`/`resolve_principal` seam wired) and submits inbound
+      messages from **every** platform adapter into it, replacing per-platform
+      bespoke dispatch. `grep -n "InboundRouter" gateway/run.py` is non-empty.
+- [ ] Each platform adapter's inbound hook calls the matching producer
+      (`normalize_whatsapp` / `normalize_email` / `normalize_message` / calendar
+      cron) tagged with the **receiving** `account_id`; no adapter runs its own
+      LLM/DeepSeek triage (reasoning happens once in the shared core).
+- [ ] Egress routes back through the originating `account_id` (reply leaves via
+      the same number/inbox that received it) — asserted for ≥2 accounts.
+- [ ] **Per-user pairing/enrollment:** a WhatsApp sender / email `from_address`
+      resolves to an internal `Principal` via `gateway/pairing.py`
+      (`resolve_principal`); unpaired identities fall back to channel-identity
+      keying (documented, not silently shared). Email pairing is **opt-in** per
+      `platforms.email.unauthorized_dm_behavior` (see `gateway/config.py`).
+- [ ] Prompt-cache safety preserved: per-`session_key` cached `AIAgent`
+      (reuse `gateway/run.py`'s existing cache), frozen system prompt, strict
+      role alternation, per-session serial / cross-session parallel drain.
+- [ ] Tests: gateway-level E2E proving a WhatsApp message and an email into two
+      accounts land in two isolated sessions under one profile, egress via the
+      correct account, and a `private:<other>` row stays invisible (negative
+      access). `scripts/run_tests.sh`, `ruff`, `ty`, baseline all green.
+- [ ] **System test on `hermes-systest`:** live WhatsApp round-trip (paired
+      number → shared brain → reply out) and live email round-trip
+      (inbox → shared brain → reply out), plus the two-account isolation +
+      channel-prod guard checks from the *System testing* section, run on the
+      deployed box. Record evidence.
+
+**Non-goals here:** Shape-2 (N durable adapter instances per account via
+`PlatformConfig.accounts:`) remains a later step; the migration only needs
+Shape-1 wired into the live gateway.
 
 ## Data model
 - `SessionSource.account_id` (additive). Shared coordination state (in-flight / handled / dedupe / per-lead status) lives in the FG-05 **live** store, read via tool call (cache-safe).
@@ -71,13 +119,15 @@ Tests green + baseline green (session-key lock intact) + `ruff`/`ty` clean; Shap
 - [x] Channel prod-only guard — `gateway/inbound.py` `guard_channel_prod` (routes via C3 `resolve_mode`)
 - [x] Channel identity → Principal bound via the C1 `resolve_principal` seam — `gateway/inbound.py` `bind_channel_principal`
 - [x] tests + Shape-2 migration notes (unit + Postgres E2E incl. negative-access; Shape 2 documented in `gateway/inbound.py` + Design §3)
-- [ ] System test on the system-test ECS passed (see *System testing* section) — **pending owner (Leo) coordination; not accessible from this session**
+- [ ] **Live-gateway wiring (Shape-1 → `gateway/run.py`)** — see *Gateway migration* section; router/producers exist but the running gateway does not route channels through them yet
+- [x] System test on the system-test ECS — Telegram inbound→C4 route→DeepSeek→egress + web/Telegram parity **PASSED** (2026-07-11); WhatsApp + email live round-trip **still pending** (needs the gateway migration + channel creds)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
 | 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
+| 2026-07-12 | 4 | devin:8cec0d47 | Added *Gateway migration (Shape-1 → live `gateway/run.py`)* section + checklist; corrected status/progress to reflect that the live gateway does not yet route channels through `InboundRouter` (only Telegram was live-tested; WhatsApp/email live round-trip pending migration + creds) | Leo: migrate the live gateway to the one-brain router first, then do live WhatsApp/email round-trips; document so future agents can follow/verify |
 | 2026-07-11 | 3 | devin:733e4888 | Implemented C4 (`SessionSource.account_id`/`internal_user_id`/`task` + `build_session_key` fold-in, byte-stable for single-account callers) and Shape 1 (`gateway/inbound.py` in-process `InboundRouter` queue+bounded pool with per-session-serial / cross-session-parallel turns; `gateway/producers.py` thin WhatsApp/email/calendar normalizers + calendar cron producer). Bound channel identity → Principal via the C1 `resolve_principal` seam; channels forced prod-only via the C3 router. Added unit tests + Postgres E2E (≥2 accounts isolated, principal binding, negative-access); baseline + `ruff`/`ty` clean. | Publish contract C4 early in Wave 1 (FG-06/FG-09 depend on it); realise one-brain-all-channels without per-channel silos while preserving prompt-cache safety. |
 
 ## Cloud-agent prompt
