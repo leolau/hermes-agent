@@ -155,9 +155,30 @@ class PgvectorMemoryStore:
             f'CREATE SCHEMA IF NOT EXISTS "{self._store.schema}"'
         )
         await connection.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        # pgvector may be installed in a schema other than the app schema
+        # (a standard self-hosted Supabase installs it into ``public``). The
+        # ``vector`` type, its cast, and the ``<=>`` operator only resolve when
+        # that schema is on the search path, and the asyncpg codec must be
+        # registered against the schema the type actually lives in — otherwise
+        # every connection fails with ``type "vector" does not exist`` even
+        # though the extension is present. Resolve it dynamically and keep the
+        # app schema first so scoped tables/RLS still land there.
+        vector_schema = await connection.fetchval(
+            """
+            SELECT n.nspname
+            FROM pg_extension e
+            JOIN pg_namespace n ON n.oid = e.extnamespace
+            WHERE e.extname = 'vector'
+            """
+        ) or self._store.schema
+        if vector_schema != self._store.schema:
+            await connection.execute(
+                "SELECT set_config('search_path', $1, false)",
+                f'"{self._store.schema}", "{vector_schema}"',
+            )
         await connection.set_type_codec(
             "vector",
-            schema=self._store.schema,
+            schema=vector_schema,
             encoder=_encode_vector,
             decoder=_decode_vector,
             format="text",
