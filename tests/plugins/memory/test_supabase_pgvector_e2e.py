@@ -288,3 +288,47 @@ async def test_initializes_when_vector_extension_lives_in_another_schema(
         assert table_schema == "app_dev"
     finally:
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_initialize_with_caller_injected_connection_when_vector_elsewhere(
+    postgres_dsn: str,
+) -> None:
+    """A caller-injected connection must still make ``vector`` usable.
+
+    :class:`hermes_cli.goal_management.GoalManagementService.initialize` opens
+    one C3 connection (``search_path`` pinned to ``app_dev``) and hands it to
+    ``memory.initialize(connection=...)``, ``write``, etc. That bypasses
+    ``_connect``'s vector-schema resolution, so on a real Supabase (extension
+    in ``public``) the ``hnsw`` index build fails with ``operator class
+    "vector_cosine_ops" does not exist`` — and every subsequent write/query
+    with the same injected connection would fail too. The store must prepare
+    the vector type/opclass/codec on the injected connection as well. Regression
+    for that integrated-path crash.
+    """
+    await _reset(postgres_dsn)
+    conn = await asyncpg.connect(postgres_dsn, ssl=False)
+    try:
+        await conn.execute("DROP EXTENSION IF EXISTS vector CASCADE")
+        await conn.execute("CREATE EXTENSION vector SCHEMA public")
+    finally:
+        await conn.close()
+
+    store = _store(postgres_dsn)
+    # Mirror GoalManagementService: a raw store connection pinned to app_dev,
+    # NOT the store's own prepared connection, handed in to every call.
+    injected = await store._store.connect()
+    try:
+        # Before the fix: operator class "vector_cosine_ops" does not exist.
+        await store.initialize(connection=injected)
+        alice = Principal(user_id="alice", display="Alice", role="member")
+        written = await store.write(
+            alice, "integrated path recall works", topic="ext", connection=injected
+        )
+        assert written.id
+        hits = await store.query(
+            alice, "does the injected-connection path recall", connection=injected
+        )
+        assert hits and "integrated path recall" in hits[0].text
+    finally:
+        await injected.close()
