@@ -1,0 +1,71 @@
+# core_manifest.yaml — Contract C7 (FG-14): the machine-readable Core boundary.
+#
+# This file enumerates the **Core** area of the repository: the fixed system
+# machinery that the runtime LLM agent must NEVER modify. A hard runtime
+# write-guard (agent/core_boundary.py) refuses any *agent* file/terminal write
+# whose resolved path matches one of the globs below.
+#
+# Everything NOT matched here is **Customizable** — plugins, skills, user
+# tools, behavioural config.yaml, user-owned app data — which the agent may
+# edit (each edit change-tracked via C5 for a reversible self-improvement
+# history).
+#
+# IMPORTANT — this boundary applies to the *runtime agent only*:
+#   * The agent's file-write tools (tools/file_operations.py) are guarded.
+#   * The human developer path (git, PRs, `hermes update`) is NOT guarded —
+#     humans still change Core through the repo/PR flow. That is the ONLY way
+#     Core (including this manifest) changes.
+#
+# Self-protecting: this file and the guard module are themselves Core, so the
+# agent cannot rewrite the manifest to widen its own write scope, and there is
+# no config/env/prompt switch that disables the guard.
+#
+# Glob syntax (matched against the path relative to the repo root, POSIX form):
+#   * `foo.py`      — an exact file at the repo root.
+#   * `pkg/mod.py`  — an exact nested file.
+#   * `dir/**`      — the directory `dir` and everything beneath it (recursive).
+#   * `*` matches within a path (fnmatch semantics); `dir/**` is the preferred
+#     recursive form and is what the classifier special-cases.
+#
+# Fail-closed: if this manifest is missing or unparseable at runtime, the guard
+# falls back to a baked-in copy of these Core roots (see
+# `agent/core_boundary._FALLBACK_CORE_GLOBS`) so Core stays protected even if
+# the manifest is deleted or corrupted.
+
+core_globs:
+  # --- Core agent machinery (the narrow waist) ---------------------------
+  - run_agent.py          # AIAgent — the core conversation/tool loop
+  - model_tools.py        # tool orchestration + handle_function_call()
+  - toolsets.py           # toolset definitions + _HERMES_CORE_TOOLS
+  - cli.py                # HermesCLI interactive orchestrator
+  - hermes_state.py       # SessionDB (SQLite session store)
+
+  # --- Core messaging gateway --------------------------------------------
+  - gateway/**            # one-brain gateway: run.py, session.py, platforms/, ...
+
+  # --- FG-12 change-management engine (C5) -------------------------------
+  - hermes_cli/changes.py       # append-only change log + undo/redo engine
+  - hermes_cli/changes_cli.py   # C5 CLI surface
+
+  # --- FG-18 GTS Centre engine (Goals/Tasks/Skills) ----------------------
+  # The GTS Centre is a Core tool (D14): its implementation + governing rules
+  # are immutable to the runtime agent (only its *data* is mutable, within its
+  # authority rules). These are the goal/task registry engine files the GTS
+  # Centre is built on. FG-18 appends its dedicated engine module here when it
+  # lands (human PR — the manifest is Core).
+  - hermes_cli/goal_registry.py
+  - hermes_cli/goals.py
+  - hermes_cli/task_registry.py
+
+  # --- The boundary guard itself + this manifest (self-protecting) -------
+  - agent/core_boundary.py
+  - core_manifest.yaml
+
+notes: >
+  Core is immutable to the runtime LLM agent AND to end users (decision D10);
+  only human developers change Core, via the repo/PR flow. The write-guard is
+  fail-closed and escape-safe (resolves `..`, symlinks, absolute paths, and
+  mount escapes before classifying) and has no user/config/env/prompt override.
+  A denied Core write emits a C5 change-audit event + a C8 trace event
+  (kind `core_denied`); allowed Customizable writes proceed through the normal
+  write path. See docs/design/master-plan/feature-groups/FG-14-core-customizable-boundary.md.
