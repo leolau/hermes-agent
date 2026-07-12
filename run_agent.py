@@ -2435,6 +2435,17 @@ class AIAgent:
         retryable: Optional[bool] = None,
         reason: Optional[str] = None,
     ) -> None:
+        try:
+            from hermes_cli.interactions import current_trace_id, observe
+
+            observe(
+                "error",
+                ref=api_request_id,
+                summary=f"{error_type}: {reason or 'api_request_error'}",
+            )
+            interaction_trace_id = current_trace_id() or ""
+        except Exception:
+            interaction_trace_id = ""
         # Lazy module import (not from-import) so tests that
         # ``monkeypatch.setattr("hermes_cli.plugins.has_hook", ...)`` still
         # take effect on this call site. After first call the import is a
@@ -2470,6 +2481,7 @@ class AIAgent:
                     "message": error_message,
                 },
                 request=self._api_request_payload_for_hook(api_kwargs),
+                trace_id=interaction_trace_id,
             )
         except Exception:
             pass

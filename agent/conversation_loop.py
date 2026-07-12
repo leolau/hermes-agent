@@ -596,6 +596,16 @@ def run_conversation(
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
+    try:
+        from hermes_cli.interactions import observe
+
+        observe(
+            "turn",
+            ref=turn_id,
+            summary="Agent turn",
+        )
+    except Exception as _trace_err:
+        logger.debug("turn interaction trace failed: %s", _trace_err)
 
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
@@ -2068,6 +2078,24 @@ def run_conversation(
                             pass
                     agent.session_cost_status = cost_result.status
                     agent.session_cost_source = cost_result.source
+                    try:
+                        from hermes_cli.interactions import observe
+
+                        _trace_cost = float(cost_result.amount_usd or 0.0)
+                        if _moa_ref_cost is not None:
+                            _trace_cost += float(_moa_ref_cost)
+                        observe(
+                            "cost",
+                            ref=api_request_id,
+                            summary=(
+                                f"model={_agg_cost_model} amount_usd={_trace_cost:.8f} "
+                                f"status={cost_result.status} "
+                                f"input_tokens={canonical_usage.input_tokens} "
+                                f"output_tokens={canonical_usage.output_tokens}"
+                            ),
+                        )
+                    except Exception as _trace_err:
+                        logger.debug("cost interaction trace failed: %s", _trace_err)
 
                     # Persist token counts to session DB for /insights.
                     # Do this for every platform with a session_id so non-CLI

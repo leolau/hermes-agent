@@ -1241,6 +1241,19 @@ display:
 
 
 # =============================================================================
+# Action Tracking / Interaction Trace
+# =============================================================================
+# C8 records gateway, turn, tool, cost, change, approval, and error metadata in
+# the C3-routed application schema. It never modifies model messages.
+action_tracking:
+  enabled: true
+  retention_days: 30
+  rollup: true
+  # Deterministic sample rate for tool_call/tool_result spans only (0.0–1.0).
+  sample: 1.0
+
+
+# =============================================================================
 # Update Behavior
 # =============================================================================
 updates:

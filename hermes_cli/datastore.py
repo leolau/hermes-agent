@@ -213,7 +213,7 @@ def get_store(
 
 
 async def initialize_supabase_app(connection: asyncpg.Connection) -> None:
-    """Create the C3 application schemas and promotion audit tables."""
+    """Create the C3 application schemas and additive contract tables."""
     await connection.execute(
         """
         CREATE SCHEMA IF NOT EXISTS app_dev;
@@ -246,6 +246,7 @@ async def initialize_supabase_app(connection: asyncpg.Connection) -> None:
 
         CREATE TABLE IF NOT EXISTS app_prod.changes (
             id TEXT PRIMARY KEY,
+            trace_id TEXT,
             ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             actor TEXT NOT NULL,
             mode TEXT NOT NULL CHECK (mode IN ('dev', 'prod')),
@@ -257,6 +258,10 @@ async def initialize_supabase_app(connection: asyncpg.Connection) -> None:
             approval_ref TEXT NOT NULL REFERENCES app_prod.approvals(id),
             backup_ref TEXT
         );
+        ALTER TABLE app_prod.changes
+            ADD COLUMN IF NOT EXISTS trace_id TEXT;
+        CREATE INDEX IF NOT EXISTS changes_trace_id_idx
+            ON app_prod.changes (trace_id);
 
         CREATE TABLE IF NOT EXISTS app_prod.promotions (
             id TEXT PRIMARY KEY,
@@ -271,3 +276,6 @@ async def initialize_supabase_app(connection: asyncpg.Connection) -> None:
         );
         """
     )
+    from hermes_cli.interactions import initialize_interactions
+
+    await initialize_interactions(connection)

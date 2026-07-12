@@ -866,21 +866,29 @@ def _emit_post_tool_call_hook(
     error_message: Optional[str] = None,
     middleware_trace: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
-    """Emit the ``post_tool_call`` observer hook.
-
-    No-ops cheaply when no plugin has registered for ``post_tool_call`` —
-    the ``has_hook`` gate skips both the result-field derivation and the
-    payload dispatch so the no-listener path costs one dict lookup.  When
-    ``status`` is not supplied, the ok/error fields are derived from the
-    result *after* the gate (parsing the result is only worth it when a
-    listener will actually consume it).
-    """
+    """Emit the C8 tool result and opt-in ``post_tool_call`` observer hook."""
     try:
         from hermes_cli.plugins import has_hook, invoke_hook
-        if not has_hook("post_tool_call"):
+        from hermes_cli.interactions import (
+            current_trace,
+            observe_tool_result,
+        )
+
+        has_plugin = has_hook("post_tool_call")
+        if current_trace() is None and not has_plugin:
             return
         if status is None:
             status, error_type, error_message = _tool_result_observer_fields(result)
+        tool_ref = tool_call_id or f"{turn_id or ''}:{function_name}"
+        observe_tool_result(
+            tool_call_id=tool_ref,
+            tool_name=function_name,
+            status=status or "unknown",
+            turn_id=turn_id or "",
+            duration_ms=duration_ms,
+        )
+        if not has_plugin:
+            return
         invoke_hook(
             "post_tool_call",
             tool_name=function_name,
