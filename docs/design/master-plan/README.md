@@ -1,9 +1,12 @@
 # Hermes / ai-prentice — Master Implementation Plan
 
-> **Status:** PLAN (no feature code yet). This document + the per-feature-group
+> **Status:** PLAN. This document + the per-feature-group
 > docs under [`feature-groups/`](./feature-groups/) are the single source of
-> truth for the 13-feature-group build-out. Baseline regression tests live in
-> `tests/plan_baseline/`.
+> truth for the multi-phase build-out — **Phase 1: FG-01–13** (multi-user,
+> multi-channel one-brain; largely built + system-tested) and **Phase 2:
+> FG-14–19** (requirements 14.0–19.0: Core/Customizable boundary, easy
+> onboarding, action tracking, Next.js dashboard, GTS Centre, per-user GTS +
+> assignment). Baseline regression tests live in `tests/plan_baseline/`.
 >
 > **Scope:** turn the single-owner personal Hermes deployment (ai-prentice) into
 > a **multi-user, multi-channel, self-improving agent platform** for an
@@ -21,7 +24,7 @@
   testing requirements, dependencies, wave, definition-of-done, a live
   **progress checklist**, a **per-FG audit log**, and a **ready-to-paste Devin
   cloud-agent prompt**.
-- **`agent-prompts.md`** = all 13 cloud-agent prompts in one place.
+- **`agent-prompts.md`** = all cloud-agent prompts in one place.
 
 ### Governance / edition tracking (IMPORTANT for parallel agents)
 - The **master plan changelog** (§9) is *append-only*. Any change to
@@ -50,6 +53,17 @@
 | D7 | **`session_key` gains dimensions.** | `session_key = f(channel identity, account_id, internal user, task)` to maximise prompt-cache locality and isolate `(user, task)` cores. Extends `SessionSource` (adds `account_id`) + the key builder. |
 | D8 | **Infra.** | Migrate the ai-prentice ECS to **`ecs.e-c1m4.xlarge` (4 vCPU / 16 GB)** first, **dedicated ESSD data disk** for Supabase, **EIP** for a stable IP; **in-place resize to `ecs.e-c1m4.2xlarge` (8/32)** when needed (same-family resize, ~5 min stop/start, no data migration). |
 | D9 | **Delivery = parallel Devin cloud agents**, one per FG, coordinated in **dependency waves**. Shared contracts merge first (Wave 0). | See §5, §6. |
+
+### Phase-2 locked decisions (reqs 14.0–19.0, from Leo, 2026-07-12)
+
+| # | Decision | Consequence |
+|---|----------|-------------|
+| D10 | **Core is immutable to the runtime agent AND to end users; only human devs change Core (via repo/PR).** | A repo-committed `core_manifest.yaml` + a **hard runtime write-guard** at the agent's file/terminal chokepoint refuses any agent write to a Core path (fail-closed, no user/config override). Prevents a user from talking the LLM into breaking the system. Everything else (plugins/skills/tools/behavioural `config.yaml`/`app_*` data) is **Customizable** and change-tracked (C5). Publishes **C7**. (FG-14) |
+| D11 | **Every interaction is traceable end-to-end via one `trace_id`; the trace is observability-only (cache-safe), RLS-scoped, retention-capped.** | Append-only `interactions` ledger joins inbound→turn→tool→outbound + linked change/cost/approval on one id; **never** injected into the prompt; user sees own, owner sees all; retention/rollup bounds growth. Extends C5 + cost tracking; publishes **C8**. (FG-16) |
+| D12 | **Dashboard standardizes on Next.js (App Router) — frontend-only migration over the existing Python API backend.** All new in-house tools stay **Next.js + Node** (D3). | Port `web/` Vite→Next.js feature-for-feature against the unchanged `/api/*` backend (re-run FG-07/10 acceptance). Dashboard = the system "face": Core-area view, embedded Telegram chat, agent webview, tool link/icons. Dashboard + backend are Core (C7). (FG-17) |
+| D13 | **Telegram is both a native channel (app) and the dashboard-embedded conversational UI**; both hit the same FG-03 one-brain backend. WhatsApp/email/other channels stay live. | Embedded web-Telegram (or a dashboard-native chat bound to the same bot/session) routes through the same gateway/session as the Telegram app. (FG-17) |
+| D14 | **GTS Centre is a Core tool** unifying goals/tasks/skills; its implementation + governing rules are immutable to user/agent (only data is mutable, within its authority rules). | Extends FG-04 goals + FG-06 tasks + skills (no new store): **M:N** task↔goals & skill↔tasks, **hierarchical** goals/tasks with priorities, **user-only** top-level goals + evaluation methods, **agent** sub-goals/tasks, **auto-computed score 0–100** with priority-weighted rollup. Publishes **C9**. (FG-18) |
+| D15 | **GTS is per-user isolated; owner sees all; cross-user assignment is a per-item grant (single assignee + optional watchers).** | An assigned item stays private to its creator but the assignee gets scoped access to *that item only* (no leak of the owner's other private GTS). Extends C2 with per-row grants + RLS; top-level goals not assignable; assignee can advance progress but not change eval method/reassign/delete; full C5/C8 audit. (FG-19) |
 
 Cost context (see chat): current 2/4 box ≈ **$36/mo**; target 4/16 ≈ **$137/mo + ~$15 disk**; 8/32 ≈ **$266–317/mo**.
 
@@ -83,7 +97,9 @@ Every FG must obey these or it will not merge:
 
 ---
 
-## 3. The 13 feature groups (index)
+## 3. Feature groups (index)
+
+### Phase 1 — FG-01–13 (multi-user, multi-channel one-brain)
 
 | FG | Title | Wave | Primary reuse anchors |
 |----|-------|------|-----------------------|
@@ -100,6 +116,17 @@ Every FG must obey these or it will not merge:
 | [11](./feature-groups/FG-11-agent-comms-mcp.md) | Agent comms: MCP | 1 | `mcp_serve.py`, `tools/mcp_tool.py`, catalog |
 | [12](./feature-groups/FG-12-change-management.md) | Change management (data/config/code) + undo/redo/approve/backup | 1 | `tools/checkpoint_manager.py`, `approval`, `write_approval`, `backup.py` |
 | [13](./feature-groups/FG-13-dev-prod-mode.md) | Dev vs Prod mode + dev SQLite/Supabase (channels prod-only) | **0** | `hermes_constants.py`, `hermes_state.py`, `config.yaml` |
+
+### Phase 2 — FG-14–19 (reqs 14.0–19.0)
+
+| FG | Title | Wave | Primary reuse anchors |
+|----|-------|------|-----------------------|
+| [14](./feature-groups/FG-14-core-customizable-boundary.md) | Core vs Customizable boundary + protection (C7) | **A** | `core_manifest.yaml` (new), file/terminal write chokepoint, `changes.py` (C5) |
+| [16](./feature-groups/FG-16-action-tracking-traceability.md) | Action tracking & traceability (C8) | **A** | `hermes_logging.py`, SessionDB, cost-tracker, `changes.py`, `plugins/observability/` |
+| [15](./feature-groups/FG-15-easy-onboarding.md) | Easy onboarding (readiness score) | **B** | `hermes setup`, `config.yaml onboarding:`, `hermes tools`, FG-01/13 |
+| [18](./feature-groups/FG-18-gts-centre.md) | GTS Centre (Goals→Tasks→Skills), a Core tool (C9) | **B** | `goal_registry.py`+`goals.py` (FG-04), `tasks`/kanban/todo (FG-06), skills |
+| [17](./feature-groups/FG-17-dashboard-nextjs-face.md) | Dashboard = the face → Next.js + embedded Telegram + agent webview | **B→C** | `web/` (port Vite→Next.js), `web_server.py`/`/api/*`, `dashboard_auth`, CDP browser, FG-07 |
+| [19](./feature-groups/FG-19-gts-per-user-isolation-assignment.md) | Per-user GTS isolation + cross-user assignment | **C** | FG-18 C9, C2 `can_read`/`scope_filter`+RLS, FG-10 (C6) |
 
 ---
 
@@ -118,6 +145,12 @@ land before any parallel feature work so agents don't collide on the god-files
 
 Wave-0 agents publish these as typed interfaces + docstrings + baseline tests
 **before** Wave-1 agents start.
+
+### Phase-2 contracts (published by FG-14/16/18; consumed by the rest)
+
+- **C7 — Core/Customizable boundary** (FG-14). A repo-committed `core_manifest.yaml` (globs) + a **hard runtime write-guard** at the agent's file/terminal write chokepoint: any agent write whose resolved path is Core is **refused** (fail-closed, escape-safe, no user/config override) and audited. Applies to the runtime LLM agent only; human dev/git/`hermes update` unaffected. Customizable writes emit C5.
+- **C8 — Interaction trace** (FG-16). Append-only `interactions(id, trace_id, parent_id, ts, actor_user_id, session_key, platform, kind∈{inbound,turn,tool_call,tool_result,outbound,approval,change,cost,error,core_denied}, ref, summary, payload_ref, mode)`; one `trace_id` per originating interaction joins messages+tools+changes(C5)+cost; **cache-safe** (never prompt-injected), **RLS-scoped** (owner sees all), retention/rollup-capped. Reuses logging/SessionDB/cost-tracker/`changes.py`/observability plugin.
+- **C9 — GTS graph** (FG-18; assignment extended by FG-19). Unified nodes + typed edges over FG-04 goals + FG-06 tasks + skills: hierarchical goals/tasks (`parent_*_id`, cycle-safe) with priorities, **M:N** `task_goals`/`task_skills`, user-owned `evaluation_methods` (agent-immutable), auto-computed `score` (0–100, priority-weighted rollup). FG-19 adds `assignee_user_id` (tasks + sub-goals only) + `item_grants` (single assignee + watchers) extending C2.
 
 ---
 
@@ -149,6 +182,33 @@ WAVE 3 (integration)
 ON HOLD (not scheduled — resume only on explicit owner go-ahead)
   └─ FG-02  blockchain DID + ERC-721    (would be Wave 2; needs C1, C6; plugin+MCP)
 ```
+
+### Phase 2 (reqs 14.0–19.0) — waves (start after Phase-1 `develop` is merged)
+
+```
+WAVE A (Phase-2 foundations — parallel; publish contracts first, like Wave 0)
+  ├─ FG-14  Core/Customizable boundary (C7)   (needs C5/FG-12, C2/FG-01)
+  └─ FG-16  action tracking & trace (C8)       (needs C1/C2, C5, C3)
+
+WAVE B (parallel; each owns a distinct subsystem)
+  ├─ FG-18  GTS Centre (C9)                    (needs FG-04, FG-06, C2, C5/C6, C3; FG-14 marks engine Core)
+  ├─ FG-17a dashboard frontend Vite→Next.js    (parity port over existing /api/* — can start immediately)
+  └─ FG-15  easy onboarding (CLI-first)        (needs FG-01, FG-13; dashboard wizard rides FG-17)
+
+WAVE C (integration — after Wave B)
+  ├─ FG-19  per-user GTS isolation + assignment (needs FG-18 C9, C2/roles, C6/FG-10)
+  └─ FG-17b dashboard new panels               (Core-area view + embedded Telegram + agent webview +
+             GTS Centre UI + trace view + onboarding wizard — needs FG-14/16/18/19/15)
+```
+
+**Phase-2 parallelization (mirrors §6):** FG-14, FG-16, and FG-17a (parity
+port) are independent and can run as **three parallel agents immediately** after
+Phase-1 `develop` merges; FG-18 and FG-15 join in Wave B (deps are already
+merged Phase-1 FGs). Wave C (FG-19 + FG-17b integration panels) starts once
+FG-18/16/14 land. As in Wave 0, **publish the new contracts (C7/C8/C9) as small
+interface PRs first** so Wave-B/C agents don't collide on the god-files. Each
+agent works on its own branch, edits only its FG doc, keeps baseline green, and
+re-runs the affected system-test checklists (FG-17 must re-run FG-07/10).
 
 > **FG-02 (blockchain) is ON HOLD** per Leo (2026-07-11). It is excluded from
 > the wave schedule and will not be launched until the owner explicitly
@@ -281,6 +341,23 @@ transient, and in-place-resize to 8/32 (same-family, ~5 min, no data migration
   channel creds** (email = old-box Gmail IMAP app-passwords; WhatsApp = QR
   bind). Status + checklist: *Gateway migration* in
   `feature-groups/FG-03-multi-channel-redesign.md`.
+  - **Update (2026-07-12):** live **read-only** validation completed on the
+    system-test box — Telegram full round-trip (inbound→DeepSeek→egress) +
+    approval parity; WhatsApp (personal `85251922892` + ConnectAR `85296660978`,
+    resumed sessions, read-only) and email (Gmail IMAP, read-only) confirmed
+    resolving through the migrated C4 identity path. Auto-reply/SMTP send NOT
+    tested (owner: read-only for now). Old ECS WhatsApp bridges stopped +
+    sessions neutralized (renamed `*.disabled-20260712`). **Prod not promoted**
+    (owner deferred — more features/testing first).
+- **Phase 2 (reqs 14.0–19.0) added (2026-07-12):** FG-14–19 planned (see §1
+  D10–D15, §3, §4 C7–C9, §5 Phase-2 waves). Key constraints carried in: the
+  Core write-guard (C7) must be fail-closed with no user override; the
+  interaction trace (C8) must stay cache-safe + RLS-scoped + retention-capped;
+  the Next.js dashboard is a **frontend-only** migration (keep the Python API)
+  and must re-run FG-07/10 acceptance to prove no regression; GTS Centre (C9)
+  must **extend** FG-04/06 (no new store) with user-only top-level goals +
+  evaluation methods and auto-computed scores; cross-user assignment (D15) adds
+  per-item grants to C2 without leaking the owner's other private data.
 
 ---
 
@@ -293,4 +370,5 @@ transient, and in-place-resize to 8/32 (same-family, ~5 min, no data migration
 | 2026-07-12 | 5 | devin:8cec0d47 (for Leo) | FG-03 | Documented the outstanding **gateway migration** (Shape-1 `InboundRouter`/producers → live `gateway/run.py`) as an executable checklist in FG-03; added a §8 open item. Clarified WhatsApp/email are not yet live at runtime (only Telegram was live-tested) | Leo: migrate the live gateway to the one-brain router first, then live WhatsApp/email round-trips; make it followable/verifiable by future agents |
 | 2026-07-11 | 3 | devin:8cec0d47 (for Leo) | infra/testing | System-test host = a **new** 4/16 ECS (`hermes-systest`, `i-j6c81aisv2dd8mg17yle`, EIP `47.83.199.25`, 100 GB ESSD at `/opt/data`), which also hosts prod for now (`app_staging` vs `app_prod` schemas + separate SQLite cores via C3); retitled the FG section to "System testing (system-test box)" | Leo: the existing 2/4 box is too small for the new self-hosted-Supabase design; provisioned the new box and pointed system testing (and, for now, prod) at it |
 | 2026-07-11 | 4 | devin:8cec0d47 (for Leo) | scope | **FG-02 (blockchain DID + ERC-721) put ON HOLD** — removed from the Wave-2 schedule; will not be launched until the owner explicitly resumes it. All other FGs proceed. | Leo: hold the blockchain implementation but go ahead with the rest. FG-02 has no downstream dependents, so holding it blocks nothing. |
+| 2026-07-12 | 7 | devin:8cec0d47 (for Leo) | scope/Phase-2 | **Added Phase 2 (reqs 14.0–19.0):** new decisions **D10–D15**, contracts **C7 (Core/Customizable boundary), C8 (interaction trace), C9 (GTS graph)**, index rows + docs for **FG-14–19**, a Phase-2 wave/parallelization plan (§5), and a §8 update recording the completed live read-only WhatsApp/email/Telegram validation (prod not promoted). Frontend-only Next.js dashboard migration (keep Python API); GTS Centre extends FG-04/06 (no new store); single-assignee cross-user assignment via per-item grants. | Leo: study reqs 14–19 and revise the plan without regressions; standardize dashboard on Next.js; keep multi-channel one-brain; hard-block the runtime agent from Core; full interaction tracing; per-user GTS + assignment. Decisions confirmed in session (Next.js frontend-only, single assignee + watchers, full trace + retention/cache-safe/access-scoped). |
 | 2026-07-11 | 6 | devin:8cec0d47 (for Leo) | FG-03 | **Implemented the FG-03 live-gateway wiring.** `gateway/run.py` now enriches each inbound turn with the C4 identity (receiving `account_id` + sender→internal `Principal`) at the `_handle_message_with_agent` chokepoint before session-key/cached-`AIAgent` lookup, reusing the existing per-session-serial / cross-session-parallel cached-agent dispatch (no second `InboundRouter` queue). Gated → byte-stable no-op when the app-DB DSN is unset. Added `tests/gateway/test_live_gateway_identity_wiring.py`; updated the §8 open item + FG-03 status/checklist. Live WhatsApp/email round-trip still pending channel creds. | Leo: migrate the live gateway to the one-brain router first, then live WhatsApp/email round-trips. |
