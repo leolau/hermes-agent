@@ -101,6 +101,36 @@ def _fire_approval_hook(hook_name: str, **kwargs) -> None:
     Only fires for the two approval-specific hooks in VALID_HOOKS:
     pre_approval_request, post_approval_response.
     """
+    kwargs.setdefault("turn_id", _approval_turn_id.get())
+    kwargs.setdefault("tool_call_id", _approval_tool_call_id.get())
+    try:
+        from hermes_cli.interactions import current_trace_id, observe
+
+        trace_id = current_trace_id()
+        if trace_id:
+            kwargs.setdefault("trace_id", trace_id)
+        if hook_name == "pre_approval_request":
+            observe(
+                "approval",
+                ref=str(
+                    kwargs.get("tool_call_id")
+                    or kwargs.get("pattern_key")
+                    or "request"
+                ),
+                summary="Approval requested",
+            )
+        elif hook_name == "post_approval_response":
+            observe(
+                "approval",
+                ref=str(
+                    kwargs.get("tool_call_id")
+                    or kwargs.get("pattern_key")
+                    or "response"
+                ),
+                summary=f"Approval response: {kwargs.get('choice', 'unknown')}",
+            )
+    except Exception as exc:
+        logger.debug("Approval interaction trace failed: %s", exc)
     try:
         from hermes_cli.plugins import invoke_hook
     except Exception:
@@ -108,8 +138,6 @@ def _fire_approval_hook(hook_name: str, **kwargs) -> None:
         # (e.g. bare tool-only imports, minimal test environments).
         return
     try:
-        kwargs.setdefault("turn_id", _approval_turn_id.get())
-        kwargs.setdefault("tool_call_id", _approval_tool_call_id.get())
         invoke_hook(hook_name, **kwargs)
     except Exception as exc:
         # invoke_hook() already swallows per-callback errors, so reaching here
@@ -148,6 +176,11 @@ def reset_current_observability_context(
     turn_token, tool_token = tokens
     _approval_tool_call_id.reset(tool_token)
     _approval_turn_id.reset(turn_token)
+
+
+def get_current_observability_context() -> tuple[str, str]:
+    """Return the active turn and tool ids used by side-channel observers."""
+    return _approval_turn_id.get(), _approval_tool_call_id.get()
 
 
 def get_current_session_key(default: str = "default") -> str:

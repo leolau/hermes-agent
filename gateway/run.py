@@ -10996,6 +10996,42 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             run_generation,
         )
 
+        _interaction_trace = None
+        _interaction_ledger = None
+        _interaction_context = None
+        try:
+            from hermes_cli.interactions import (
+                bind_trace,
+                create_gateway_trace,
+                observe,
+            )
+
+            _trace_config = _load_gateway_runtime_config()
+            _interaction_trace, _interaction_ledger = create_gateway_trace(
+                config=_trace_config,
+                source=source,
+                actor_user_id=(
+                    getattr(source, "internal_user_id", None)
+                    or source.user_id
+                    or "unknown"
+                ),
+                session_key=session_key,
+                platform=_platform_name,
+            )
+            _interaction_context = bind_trace(_interaction_trace)
+            _interaction_context.__enter__()
+            if _interaction_trace is not None:
+                observe(
+                    "inbound",
+                    ref=str(
+                        getattr(event, "message_id", None)
+                        or _interaction_trace.trace_id
+                    ),
+                    summary="Gateway inbound message",
+                )
+        except Exception as _trace_err:
+            logger.warning("Interaction trace setup failed: %s", _trace_err)
+
         try:
             # Emit agent:start hook
             hook_ctx = {
@@ -11006,6 +11042,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "chat_type": getattr(source, "chat_type", "") or "",
                 "session_id": session_entry.session_id,
                 "message": message_text[:500],
+                "trace_id": (
+                    _interaction_trace.trace_id if _interaction_trace else ""
+                ),
             }
             await self.hooks.emit("agent:start", hook_ctx)
 
@@ -11549,8 +11588,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                     except Exception as _e:
                         logger.debug("trailing footer send failed: %s", _e)
+                if _interaction_trace is not None:
+                    observe(
+                        "outbound",
+                        ref=str(
+                            getattr(event, "message_id", None)
+                            or _interaction_trace.trace_id
+                        ),
+                        summary="Gateway streamed response",
+                    )
                 return None
 
+            if _interaction_trace is not None:
+                observe(
+                    "outbound",
+                    ref=str(
+                        getattr(event, "message_id", None)
+                        or _interaction_trace.trace_id
+                    ),
+                    summary=f"Gateway response ({len(response)} chars)",
+                )
             return response
             
         except Exception as e:
@@ -11562,6 +11619,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception:
                 pass
             logger.exception("Agent error in session %s", session_key)
+            if _interaction_trace is not None:
+                observe(
+                    "error",
+                    ref=type(e).__name__,
+                    summary=f"Gateway agent error: {type(e).__name__}",
+                )
             # Crash-resilience for failures that happen before AIAgent enters
             # run_conversation() (for example: provider/httpx client init
             # failures). In that path the agent cannot persist the current
@@ -11643,18 +11706,48 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # 500 with a large session often means the payload is too large
                 # for the API to process — treat it the same way.
                 if _hist_len > 50:
-                    return (
+                    _gateway_error_response = (
                         "⚠️ Session too large for the model's context window.\n"
                         "Use /compact to compress the conversation, or "
                         "/reset to start fresh."
                     )
+                    if _interaction_trace is not None:
+                        observe(
+                            "outbound",
+                            ref=str(
+                                getattr(event, "message_id", None)
+                                or _interaction_trace.trace_id
+                            ),
+                            summary=f"Gateway error response ({len(_gateway_error_response)} chars)",
+                        )
+                    return _gateway_error_response
                 elif status_code == 400:
                     status_hint = " The request was rejected by the API."
-            return (
+            _gateway_error_response = (
                 f"Sorry, I encountered an unexpected error.{status_hint}\n"
                 "Try again or use /reset to start a fresh session."
             )
+            if _interaction_trace is not None:
+                observe(
+                    "outbound",
+                    ref=str(
+                        getattr(event, "message_id", None)
+                        or _interaction_trace.trace_id
+                    ),
+                    summary=f"Gateway error response ({len(_gateway_error_response)} chars)",
+                )
+            return _gateway_error_response
         finally:
+            if _interaction_ledger is not None and _interaction_trace is not None:
+                try:
+                    await _interaction_ledger.flush(_interaction_trace)
+                except Exception as _trace_err:
+                    logger.warning("Interaction trace flush failed: %s", _trace_err)
+            if _interaction_context is not None:
+                try:
+                    _interaction_context.__exit__(None, None, None)
+                except Exception:
+                    logger.debug("Interaction trace context reset failed", exc_info=True)
             # Restore session context variables to their pre-handler state
             self._clear_session_env(_session_env_tokens)
 

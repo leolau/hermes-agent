@@ -189,6 +189,28 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
         agent.session_estimated_cost_usd += float(cost_result.amount_usd)
     agent.session_cost_status = cost_result.status
     agent.session_cost_source = cost_result.source
+    try:
+        from hermes_cli.interactions import observe
+
+        trace_ref = (
+            getattr(turn, "turn_id", None)
+            or getattr(turn, "thread_id", None)
+            or agent.session_id
+            or "codex"
+        )
+        observe(
+            "cost",
+            ref=str(trace_ref),
+            summary=(
+                f"model={agent.model} "
+                f"amount_usd={float(cost_result.amount_usd or 0.0):.8f} "
+                f"status={cost_result.status} "
+                f"input_tokens={canonical_usage.input_tokens} "
+                f"output_tokens={canonical_usage.output_tokens}"
+            ),
+        )
+    except Exception:
+        logger.debug("codex interaction cost trace failed", exc_info=True)
 
     if agent._session_db and agent.session_id:
         try:
@@ -320,6 +342,16 @@ def run_codex_app_server_turn(
         turn = agent._codex_session.run_turn(user_input=user_message)
     except Exception as exc:
         logger.exception("codex app-server turn failed")
+        try:
+            from hermes_cli.interactions import observe
+
+            observe(
+                "error",
+                ref=type(exc).__name__,
+                summary=f"Codex app-server error: {type(exc).__name__}",
+            )
+        except Exception:
+            logger.debug("codex interaction error trace failed", exc_info=True)
         # Crash → unconditionally drop the session so the next turn
         # respawns from scratch instead of reusing a dead client.
         try:
@@ -360,6 +392,32 @@ def run_codex_app_server_turn(
     # is exactly what curator.py / sessions DB expect.
     if turn.projected_messages:
         messages.extend(turn.projected_messages)
+        try:
+            from hermes_cli.interactions import observe_tool_call, observe_tool_result
+
+            tool_names: dict[str, str] = {}
+            for message in turn.projected_messages:
+                if message.get("role") == "assistant":
+                    for tool_call in message.get("tool_calls") or []:
+                        tool_call_id = str(tool_call.get("id") or "")
+                        function = tool_call.get("function") or {}
+                        tool_name = str(function.get("name") or "codex")
+                        if tool_call_id:
+                            tool_names[tool_call_id] = tool_name
+                            observe_tool_call(
+                                tool_call_id=tool_call_id,
+                                tool_name=tool_name,
+                            )
+                elif message.get("role") == "tool":
+                    tool_call_id = str(message.get("tool_call_id") or "")
+                    if tool_call_id:
+                        observe_tool_result(
+                            tool_call_id=tool_call_id,
+                            tool_name=tool_names.get(tool_call_id, "codex"),
+                            status="ok",
+                        )
+        except Exception:
+            logger.debug("codex interaction tool trace failed", exc_info=True)
 
         # Persist the newly-projected assistant/tool messages ourselves.
         # This path is an early return that bypasses conversation_loop, whose

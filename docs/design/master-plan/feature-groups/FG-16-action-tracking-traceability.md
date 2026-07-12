@@ -1,6 +1,6 @@
 # FG-16 — Action tracking & traceability
 
-**Wave:** A (Phase-2 foundation) · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** A (Phase-2 foundation) · **Owner agent:** devin:eaf2cdff · **Status:** Implementation complete; system test pending
 
 ## Summary
 Make **every interaction traceable** — the second most important property after
@@ -82,18 +82,19 @@ Retention policy applies per schema. Routed via C3.
 Tests green (incl. cache-safety + negative access + RLS) + baseline green + `ruff`/`ty` clean; C8 published; one `trace_id` joins messages+tools+changes+cost; observability-only (no prompt injection); retention/rollup + RLS scoping working; **ECS system test green**.
 
 ## Progress checklist
-- [ ] C8 `interactions` ledger + emit points (inbound/turn/tool/outbound/approval/change/cost/error/core_denied)
-- [ ] `trace_id` minting + propagation into C5 changes + cost rows
-- [ ] Cache-safe guarantee (side-channel only; prompt bytes unchanged)
-- [ ] Retention/rollup/sampling (config.yaml) + RLS access scoping (C2)
-- [ ] Query API for the dashboard trace view (FG-17 renders)
-- [ ] tests (unit + cache-safety + negative + RLS + E2E) green
+- [x] C8 `interactions` ledger + emit points (inbound/turn/tool/outbound/approval/change/cost/error); the additive `core_denied` kind is published and covered, with runtime emission owned by the FG-14 guard when that seam lands
+- [x] `trace_id` minting + propagation into C5 changes + cost rows
+- [x] Cache-safe guarantee (side-channel only; prompt bytes unchanged)
+- [x] Retention/rollup/sampling (config.yaml) + RLS access scoping (C2)
+- [x] Query API for the dashboard trace view (FG-17 renders)
+- [x] tests (unit + cache-safety + negative + RLS + E2E) and `tests/plan_baseline/` green; the full-suite delta is clean against `develop`
 - [ ] System test on the system-test ECS passed (see *System testing* section)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-12 | 1 | devin:8cec0d47 (for Leo) | Created FG doc | Phase-2 req 16.0: action tracking (2nd only to security) — every interaction traceable, joined by trace_id |
+| 2026-07-12 | 2 | devin:eaf2cdff (for Leo) | Implemented C8 ledger, gateway/turn/tool/change/cost propagation, C2/RLS query scope, retention/rollup/sampling, dashboard API, and cache/access/E2E coverage | Publish the smallest additive side-channel contract without changing prompts, conversation roles, the model tool surface, or outbound telemetry defaults; ECS validation and production promotion remain requester-owned gated steps |
 
 ## Cloud-agent prompt
 > **[Phase-2 Wave A — start after Phase-1 develop is merged]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-16`). Publish contract **C8 = interaction trace**: append-only `interactions(id, trace_id, parent_id, ts, actor_user_id, session_key, platform, kind∈{inbound,turn,tool_call,tool_result,outbound,approval,change,cost,error,core_denied}, ref, summary, payload_ref, mode)` in Supabase `app_*` (C3-routed, C2-scoped). Mint one **`trace_id`** at the gateway inbound chokepoint (`gateway/run.py`) and propagate it through the `run_agent.py` turn/tool loop and into C5 change rows + cost rows so cost+changes+messages join on one id. **Reuse** `hermes_logging.py`, SessionDB, the cost-tracker, `hermes_cli/changes.py`, and `plugins/observability/` — do NOT build a parallel system. The trace is **observability-only**: it must be written to the side and **never injected into the system prompt or conversation** (prove prompt bytes are identical with tracing on vs off — prompt caching is sacred). Enforce **access scoping** via Postgres RLS (member sees own, owner sees all). Add **retention/rollup/sampling** in `config.yaml` (`action_tracking:`) to bound growth on the 4/16 box (no new non-secret env vars). Expose a query API for the FG-17 trace view. Follow `AGENTS.md` (footprint ladder — a sink/middleware, not a new core tool). Add unit + **cache-safety** + negative-access + RLS + real-path E2E tests (temp `HERMES_HOME` + throwaway Postgres); keep baseline green; run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist passes** — coordinate with Leo.

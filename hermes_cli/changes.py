@@ -86,6 +86,7 @@ class ChangeEvent:
     """A single row of the C5 change log."""
 
     id: str
+    trace_id: str | None
     actor_user_id: str | None
     mode: str
     target_kind: str
@@ -102,6 +103,7 @@ class ChangeEvent:
     def _from_row(cls, row: asyncpg.Record) -> "ChangeEvent":
         return cls(
             id=row["id"],
+            trace_id=row["trace_id"],
             actor_user_id=row["actor_user_id"],
             mode=row["mode"],
             target_kind=row["target_kind"],
@@ -138,7 +140,7 @@ class RedoResult:
 
 
 _SELECT_COLUMNS = (
-    "id, actor_user_id, mode, target_kind, op, inverse_op, reversible, "
+    "id, trace_id, actor_user_id, mode, target_kind, op, inverse_op, reversible, "
     "approval_ref, backup_ref, payload, visibility, undone"
 )
 
@@ -158,10 +160,13 @@ async def initialize_changes(connection: asyncpg.Connection) -> None:
         """
         ALTER TABLE app_prod.changes
             ADD COLUMN IF NOT EXISTS actor_user_id TEXT,
+            ADD COLUMN IF NOT EXISTS trace_id TEXT,
             ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'shared',
             ADD COLUMN IF NOT EXISTS payload JSONB,
             ADD COLUMN IF NOT EXISTS undone BOOLEAN NOT NULL DEFAULT FALSE,
             ADD COLUMN IF NOT EXISTS undone_at TIMESTAMPTZ;
+        CREATE INDEX IF NOT EXISTS changes_trace_id_idx
+            ON app_prod.changes (trace_id);
         """
     )
 
@@ -203,6 +208,7 @@ class ChangeLog:
         visibility: str = SHARED,
         payload: Any | None = None,
         backup_ref: str | None = None,
+        trace_id: str | None = None,
         approval_callback: ApprovalCallback | None = None,
         approved: bool = False,
         connection: asyncpg.Connection | None = None,
@@ -240,6 +246,9 @@ class ChangeLog:
         approval_ref = f"apr_{uuid.uuid4().hex}"
         norm_visibility = normalize_visibility(visibility)
         approval_decision = "approved" if decision.mode != "auto" else "auto"
+        from hermes_cli.interactions import current_trace_id
+
+        resolved_trace_id = trace_id or current_trace_id()
 
         async def _write(conn: asyncpg.Connection) -> None:
             async with conn.transaction():
@@ -258,13 +267,14 @@ class ChangeLog:
                 await conn.execute(
                     """
                     INSERT INTO app_prod.changes
-                        (id, actor, actor_user_id, mode, target_kind, op,
+                        (id, trace_id, actor, actor_user_id, mode, target_kind, op,
                          inverse_op, reversible, approval_ref, backup_ref,
                          payload, visibility)
-                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9,
-                            $10, $11::jsonb, $12)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9,
+                            $10, $11, $12::jsonb, $13)
                     """,
                     change_ref,
+                    resolved_trace_id,
                     actor_user_id,
                     actor_user_id,
                     mode,
@@ -279,6 +289,20 @@ class ChangeLog:
                 )
 
         await self._with_connection(_write, connection)
+        if resolved_trace_id is not None and resolved_trace_id == current_trace_id():
+            from hermes_cli.interactions import observe
+
+            observe(
+                "approval",
+                ref=approval_ref,
+                summary=f"{action}: {approval_decision}",
+            )
+            observe(
+                "change",
+                ref=change_ref,
+                summary=f"{target_kind}: {action}",
+                payload_ref=backup_ref,
+            )
         return RecordResult(change_ref, approval_ref, decision)
 
     # -- reading -----------------------------------------------------------

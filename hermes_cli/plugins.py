@@ -2067,6 +2067,18 @@ def get_pre_tool_call_block_message(
     directive wins.  Invalid or irrelevant hook return values are
     silently ignored so existing observer-only hooks are unaffected.
     """
+    tool_ref = tool_call_id or f"{turn_id}:{tool_name}"
+    try:
+        from hermes_cli.interactions import observe_tool_call
+
+        observe_tool_call(
+            tool_call_id=tool_ref,
+            tool_name=tool_name,
+            turn_id=turn_id,
+        )
+    except Exception as exc:
+        logger.debug("pre_tool_call interaction trace failed: %s", exc)
+
     allowed = getattr(_thread_tool_whitelist, "allowed", None)
     if allowed is not None and tool_name not in allowed:
         fmt = getattr(_thread_tool_whitelist, "fmt", "Tool '{tool_name}' denied")

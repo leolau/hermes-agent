@@ -912,6 +912,14 @@ DEFAULT_CONFIG = {
             "prod": {"supabase_app": {"dsn": ""}},
         },
     },
+    # C8 interaction tracing is an append-only application-datastore side
+    # channel. Sampling applies only to tool_call/tool_result spans.
+    "action_tracking": {
+        "enabled": True,
+        "retention_days": 30,
+        "rollup": True,
+        "sample": 1.0,
+    },
     "tasks": {
         "discovery": {
             "threshold": 3,

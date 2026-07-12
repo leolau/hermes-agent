@@ -3386,6 +3386,7 @@ async def comms_goal_context(goal_id: str, request: Request):
 def _comms_change_dict(event) -> dict:
     return {
         "id": event.id,
+        "trace_id": event.trace_id,
         "actor_user_id": event.actor_user_id,
         "mode": event.mode,
         "target_kind": event.target_kind,
@@ -3413,6 +3414,70 @@ async def comms_list_changes(request: Request):
         "configured": True,
         "principal": principal.user_id,
         "changes": [_comms_change_dict(c) for c in changes],
+    }
+
+
+@app.get("/api/comms/traces")
+async def comms_list_traces(request: Request):
+    """List C8 traces visible to the selected C1/C2 principal."""
+    from hermes_cli.interactions import InteractionLedger
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return _comms_unconfigured_payload("traces")
+    try:
+        limit = min(500, max(1, int(request.query_params.get("limit", "100"))))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="limit must be an integer")
+    ledger = InteractionLedger(_comms_app_store(), config=load_config() or {})
+    try:
+        await ledger.initialize()
+        traces = await ledger.list_traces(principal, limit=limit)
+    except RuntimeError:
+        return _comms_unconfigured_payload("traces")
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "traces": [trace.as_dict() for trace in traces],
+    }
+
+
+@app.get("/api/comms/traces/{trace_id}")
+async def comms_get_trace(trace_id: str, request: Request):
+    """Return a C8 trace timeline/tree projection, enforcing C2 scope."""
+    from hermes_cli.interactions import InteractionLedger
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return {
+            "configured": False,
+            "principal": None,
+            "trace_id": trace_id,
+            "interactions": [],
+            "rollup": None,
+        }
+    ledger = InteractionLedger(_comms_app_store(), config=load_config() or {})
+    try:
+        await ledger.initialize()
+        interactions, rollup = await ledger.get_trace(trace_id, principal)
+    except RuntimeError:
+        return {
+            "configured": False,
+            "principal": None,
+            "trace_id": trace_id,
+            "interactions": [],
+            "rollup": None,
+        }
+    if not interactions and rollup is None:
+        raise HTTPException(status_code=404, detail="No such trace")
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "trace_id": trace_id,
+        "interactions": [event.as_dict() for event in interactions],
+        "rollup": rollup.as_dict() if rollup else None,
     }
 
 
