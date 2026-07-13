@@ -92,18 +92,19 @@ layer). Owner-role bypass mirrored in dev/prod schemas.
 Tests green (incl. negative-access RLS + authority + audit) + baseline green + `ruff`/`ty` clean; per-user isolation + owner-sees-all; single-assignee (+ watchers) per-item grants that don't leak owner's other private data; assignee permission boundary enforced; assignment lifecycle audited (C5/C8); score stays auto-computed; **ECS system test green**.
 
 ## Progress checklist
-- [ ] Per-user GTS namespace + owner cross-user access (C2 owner-bypass in GTS Centre)
-- [ ] Per-item grants: `assignee_user_id` (tasks + sub-goals only) + `item_grants` (single assignee + watchers)
-- [ ] Extended `can_read`/`scope_filter` + Postgres RLS grant clause
-- [ ] Assignee permission boundary (progress/sub-tasks yes; eval-method/reassign/delete no) + top-level not assignable
-- [ ] Acceptance workflow + agent-initiated assignment via C6 + full C5/C8 audit
-- [ ] tests (unit + negative-access RLS + authority + audit + E2E) green
-- [ ] System test on the system-test ECS passed (see *System testing* section)
+- [x] Per-user GTS namespace + owner cross-user access (C2 owner-bypass in GTS Centre; `list_goals_for_user` owner browse)
+- [x] Per-item grants: `assignee_user_id` (tasks + sub-goals only) + `item_grants` (single assignee + watchers)
+- [x] Extended `can_read`/`scope_filter` + Postgres RLS grant clause
+- [x] Assignee permission boundary (progress/sub-tasks yes; eval-method/reassign/delete no) + top-level not assignable
+- [x] Acceptance workflow + agent-initiated assignment via C6 + full C5/C8 audit
+- [x] tests (unit + negative-access RLS + authority + audit + E2E) green
+- [ ] System test on the system-test ECS passed (see *System testing* section) — **owner-gated** (needs ≥2 real users + live channel; deferred to Leo, not promotable until it passes)
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-12 | 1 | devin:8cec0d47 (for Leo) | Created FG doc | Phase-2 req 19.0: per-user GTS isolation, owner sees all, single-assignee cross-user assignment via per-item grants |
+| 2026-07-04 | 2 | devin:3c64bcf2 (for Leo) | Implementation + full test suite complete; fixed a grant-clause bug (app-layer `scope_filter` correlated the "granted-to-me" `EXISTS` on an unqualified `id`, which resolved to `item_grants.id` inside the sub-select and never matched — the 3 GTS call sites now pass a table-qualified `id_column`, mirroring the RLS clause). Added `tests/hermes_cli/test_fg19_assignment_e2e.py` (lifecycle + score rollup + per-item isolation via **real Postgres RLS** + authority boundary + C6 approval + C5/C8 audit). Ticked all code/test checklist items. | DoD: real-path E2E for the access-control/datastore change; behavior over snapshots; ECS system test remains the only open gate (owner-controlled). |
 
 ## Cloud-agent prompt
 > **[Phase-2 Wave C — start after FG-18 (C9) + FG-01/FG-10/FG-12/FG-16/FG-13]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-19`). Add **per-user GTS isolation + cross-user assignment** on top of FG-18's C9 graph. Each GTS item defaults `private:<owner>`; the **owner role sees all** (reuse C2 bypass) + an owner cross-user browse view. Add **cross-user assignment** as a **per-item grant** (NOT a visibility downgrade): `assignee_user_id` on **tasks and sub-goals only** (top-level goals are NOT assignable) + an `item_grants(item_kind,item_id,user_id,grant∈{assignee,watcher},status,...)` table — **single assignee** + optional read-only **watchers**. **Extend** C2's `can_read`/`scope_filter` + **Postgres RLS** with an "assigned/granted to me" clause (do NOT build a new access system) so an assignee sees ONLY the assigned item, never the owner's other private GTS. Assignee may advance progress/status + add sub-tasks (agent sub-tasks ride C6) but may NOT change the **evaluation method** (user-owned per FG-18), reassign, or delete. Assignment sends a C6 notification (default auto-accept + decline); **agent-initiated assignment requires C6 approval**. Score stays **auto-computed** (FG-18). Audit assign/reassign/accept/decline/progress via C5 + C8. Follow `AGENTS.md` (extend-don't-duplicate). Keep baseline green; add unit + **negative-access RLS** + authority + audit + real-Postgres E2E tests (temp `HERMES_HOME` + throwaway Postgres); run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist passes** — coordinate with Leo.

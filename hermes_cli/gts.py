@@ -45,6 +45,7 @@ The metric maths reuses :class:`hermes_cli.goals.GoalMetric` /
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import uuid
@@ -63,10 +64,21 @@ from typing import (
 )
 
 from hermes_cli.access import (
+    GRANT_ACTIVE_STATUSES,
+    GRANT_ITEM_KINDS,
+    GRANT_TYPES,
+    ITEM_GRANTS_SCHEMA_SQL,
+    ITEM_GRANTS_TABLE,
     Principal,
+    apply_item_grants_rls,
     apply_scope_rls,
     normalize_visibility,
     scope_filter,
+)
+from hermes_cli.consent import (
+    ApprovalCallback,
+    ConsentPolicy,
+    evaluate_approval,
 )
 from hermes_cli.goal_registry import GOALS_TABLE, GoalRegistryStore
 from hermes_cli.goals import (
@@ -81,12 +93,16 @@ from hermes_cli.task_registry import (
     TASKS_TABLE,
     TaskRegistryStore,
     TaskSpec,
+    _status_for_state,
+    validate_progress_transition,
 )
 
 if TYPE_CHECKING:
     import asyncpg
 
     from hermes_cli.datastore import SupabaseAppStore
+
+logger = logging.getLogger(__name__)
 
 # --- vocabulary -------------------------------------------------------------
 
@@ -118,6 +134,20 @@ EVALUATION_METHODS_TABLE = "evaluation_methods"
 
 _TARGET_KINDS: Tuple[str, ...] = ("goal", "task")
 
+#: FG-19 per-item grant vocabulary (re-exported from the C2 grant primitive so
+#: callers of the GTS Centre have one import site).
+GRANT_ASSIGNEE = "assignee"
+GRANT_WATCHER = "watcher"
+#: Grant lifecycle actions audited through C5/C8.
+ASSIGNMENT_ACTIONS: Tuple[str, ...] = (
+    "assign",
+    "reassign",
+    "accept",
+    "decline",
+    "revoke",
+    "progress",
+)
+
 
 class GtsError(RuntimeError):
     """Base class for GTS Centre failures."""
@@ -131,6 +161,15 @@ class GtsCycleError(GtsError):
     """A hierarchy edit would create a cycle (a node cannot be its own ancestor)."""
 
 
+class GtsAssignmentError(GtsError):
+    """An assignment violated a per-item grant rule (FG-19).
+
+    Raised for structural violations: assigning a non-assignable top-level
+    goal, assigning a second active assignee (use ``reassign``), or acting on
+    a grant that does not exist / is not the caller's to act on.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Schema (additive + idempotent): extend goals/tasks, add edges + registry.
 # ---------------------------------------------------------------------------
@@ -142,7 +181,8 @@ ALTER TABLE {GOALS_TABLE}
     ADD COLUMN IF NOT EXISTS level TEXT NOT NULL DEFAULT 'top',
     ADD COLUMN IF NOT EXISTS score DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS observed_state JSONB,
-    ADD COLUMN IF NOT EXISTS evaluation_method_ref UUID;
+    ADD COLUMN IF NOT EXISTS evaluation_method_ref UUID,
+    ADD COLUMN IF NOT EXISTS assignee_user_id TEXT;
 CREATE INDEX IF NOT EXISTS {GOALS_TABLE}_parent_idx
     ON {GOALS_TABLE} (parent_goal_id);
 
@@ -152,7 +192,8 @@ ALTER TABLE {TASKS_TABLE}
     ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT '{DEFAULT_GOAL_PRIORITY}',
     ADD COLUMN IF NOT EXISTS score DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS observed_state JSONB,
-    ADD COLUMN IF NOT EXISTS evaluation_method_ref UUID;
+    ADD COLUMN IF NOT EXISTS evaluation_method_ref UUID,
+    ADD COLUMN IF NOT EXISTS assignee_user_id TEXT;
 CREATE INDEX IF NOT EXISTS {TASKS_TABLE}_parent_idx
     ON {TASKS_TABLE} (parent_task_id);
 
@@ -218,6 +259,9 @@ class GtsGoal:
     parent_goal_id: Optional[str]
     score: Optional[float]
     evaluation_method_ref: Optional[str]
+    #: The single active assignee's user id (FG-19), when this sub-goal has been
+    #: assigned; ``None`` when unassigned. Top-level goals are never assignable.
+    assignee_user_id: Optional[str] = None
 
     def as_dict(self) -> dict:
         return {
@@ -230,6 +274,7 @@ class GtsGoal:
             "level": self.level,
             "parent_goal_id": self.parent_goal_id,
             "score": self.score,
+            "assignee_user_id": self.assignee_user_id,
         }
 
 
@@ -248,6 +293,8 @@ class GtsTask:
     parent_task_id: Optional[str]
     score: Optional[float]
     evaluation_method_ref: Optional[str]
+    #: The single active assignee's user id (FG-19), or ``None`` when unassigned.
+    assignee_user_id: Optional[str] = None
 
     def as_dict(self) -> dict:
         return {
@@ -260,6 +307,7 @@ class GtsTask:
             "current_state": self.current_state,
             "parent_task_id": self.parent_task_id,
             "score": self.score,
+            "assignee_user_id": self.assignee_user_id,
         }
 
 
@@ -293,6 +341,38 @@ class EvaluationMethod:
     method: Mapping[str, object]
     set_by_user_id: str
     locked: bool
+
+
+@dataclass(frozen=True)
+class ItemGrant:
+    """A per-item cross-user grant (FG-19): the C2 assignment primitive.
+
+    A grant shares one specific GTS item (``item_kind`` + ``item_id``) with
+    ``user_id`` as either the single ``assignee`` (may advance progress / add
+    sub-tasks) or a read-only ``watcher``, without downgrading the item's
+    ``visibility``. ``status`` walks the assignment lifecycle
+    (``pending`` → ``accepted`` / ``declined`` / ``revoked``); only
+    ``pending``/``accepted`` grants confer access.
+    """
+
+    id: str
+    item_kind: str
+    item_id: str
+    user_id: str
+    grant: str
+    granted_by: str
+    status: str
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "item_kind": self.item_kind,
+            "item_id": self.item_id,
+            "user_id": self.user_id,
+            "grant": self.grant,
+            "granted_by": self.granted_by,
+            "status": self.status,
+        }
 
 
 @dataclass(frozen=True)
@@ -496,14 +576,22 @@ class GtsAuditEvent:
             "decision": self.decision,
             "reason": self.reason,
             "mode": self.mode,
-            # C8 trace row kind for a refused Core-authority mutation.
-            "kind": "core_denied",
+            # C8 trace-row kind: a refused Core-authority mutation is
+            # ``core_denied``; a recorded one is a ``change``.
+            "kind": "core_denied" if self.decision == "refused" else "change",
         }
 
 
 #: A C5 change-audit sink (e.g. an adapter over the FG-12 ``ChangeLog``). Given
 #: the shaped audit event; must never raise into the mutation path.
 GtsAuditSink = Callable[[Mapping[str, object]], None]
+
+#: A C6 assignment-notification sink (FG-19). Given a shaped notification
+#: payload (kind ``gts_assignment`` + the item/assignee/action) when a grant is
+#: created/changed; a real deployment routes it to the existing human-comms
+#: surface (FG-10). Must never raise into the assignment path; the default is a
+#: no-op so the Core engine has no hard dependency on a live channel.
+GtsNotifier = Callable[[Mapping[str, object]], None]
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +733,8 @@ class GtsCentre:
         *,
         audit_sink: Optional[GtsAuditSink] = None,
         score_evaluator: Optional[GtsScoreEvaluator] = None,
+        consent_policy: Optional[ConsentPolicy] = None,
+        notifier: Optional[GtsNotifier] = None,
     ) -> None:
         self._store = store
         self._goals = GoalRegistryStore(store)
@@ -654,6 +744,12 @@ class GtsCentre:
         # default; a real executor (LLM / db / api / mcp) can be injected here
         # without touching this Core engine.
         self._score_evaluator = score_evaluator or default_score_evaluator
+        # C6 (FG-19): an agent-initiated cross-user assignment goes through the
+        # existing consent/approval surface; the default policy prompts (never
+        # silently auto-approves an agent's cross-user side effect).
+        self._consent_policy = consent_policy or ConsentPolicy()
+        # C6 assignment notification seam (FG-10); no-op default.
+        self._notifier = notifier
 
     @property
     def mode(self) -> str:
@@ -679,14 +775,28 @@ class GtsCentre:
         *,
         connection: Optional["asyncpg.Connection"] = None,
     ) -> None:
-        """Create/extend every GTS table + RLS policy (idempotent)."""
+        """Create/extend every GTS table + RLS policy (idempotent).
+
+        The goal/task read policies are (re)installed **grant-aware** (FG-19):
+        the FG-04/FG-06 stores first install the plain shared/private policy,
+        then this method replaces it with one that also admits an active
+        per-item grant to the bound principal. Re-applying is safe — the policy
+        is dropped and recreated — and keeps the grant clause colocated with
+        the GTS Centre that owns per-item assignment.
+        """
         own = connection is None
         conn = connection or await self._connect()
         try:
             await self._goals.initialize(connection=conn)
             await self._tasks.initialize(connection=conn)
             await conn.execute(_EXTEND_SQL)
+            await conn.execute(ITEM_GRANTS_SCHEMA_SQL)
+            await apply_item_grants_rls(conn)
             await apply_scope_rls(conn, SKILLS_TABLE)
+            # Replace the plain goal/task policies with grant-aware ones so an
+            # assignee/watcher sees the granted item at the DB layer too.
+            await apply_scope_rls(conn, GOALS_TABLE, grant_item_kind="goal")
+            await apply_scope_rls(conn, TASKS_TABLE, grant_item_kind="task")
         finally:
             if own:
                 await conn.close()
@@ -767,6 +877,47 @@ class GtsCentre:
         raise GtsAuthorityError(
             f"Refused: the runtime agent may not {action} (user-only under the "
             f"GTS Centre's Core authority rules). This attempt has been audited."
+        )
+
+    def _is_item_owner(self, principal: Principal, owner_user_id: str) -> bool:
+        """Whether ``principal`` owns the item (its creator) or is the owner role."""
+        return principal.is_owner or owner_user_id == principal.user_id
+
+    def _require_item_owner(
+        self,
+        principal: Principal,
+        owner_user_id: str,
+        *,
+        actor: GtsActor,
+        action: str,
+        target_kind: str,
+        target_ref: str,
+    ) -> None:
+        """Fail-closed guard (FG-19): only the item's owner may ``action`` it.
+
+        Content edits (priority, reparent), the user-owned evaluation method,
+        and the assignment controls (assign / reassign / revoke) belong to the
+        item's creator (or the owner role). A **grantee** — an assignee or
+        watcher who can *read* the item via a per-item grant — is refused and
+        audited here; assignees may still advance progress (a separate seam).
+        """
+        if self._is_item_owner(principal, owner_user_id):
+            return
+        self._audit(
+            actor=actor,
+            actor_user_id=principal.user_id,
+            action=action,
+            target_kind=target_kind,
+            target_ref=target_ref,
+            decision="refused",
+            reason=(
+                f"{action} is owner-only (FG-19); a grantee (assignee/watcher) "
+                "may not"
+            ),
+        )
+        raise GtsAuthorityError(
+            f"Refused: only the item owner may {action}; an assignee/watcher "
+            "may not (FG-19). This attempt has been audited."
         )
 
     # -- goals -------------------------------------------------------------
@@ -873,7 +1024,9 @@ class GtsCentre:
         """List readable goal nodes, priority-ordered.
 
         With ``parent_goal_id`` returns that goal's direct children; with
-        ``top_level_only`` returns only ``level = 'top'`` goals.
+        ``top_level_only`` returns only ``level = 'top'`` goals. Grant-aware
+        (FG-19): an assignee/watcher additionally sees a specifically-granted
+        goal, but never the owner's *other* private goals.
         """
         clauses: List[str] = []
         params: List[object] = []
@@ -884,7 +1037,12 @@ class GtsCentre:
             index += 1
         elif top_level_only:
             clauses.append("parent_goal_id IS NULL")
-        predicate = scope_filter(principal, start_index=index)
+        predicate = scope_filter(
+            principal,
+            start_index=index,
+            grant_item_kind="goal",
+            id_column=f"{GOALS_TABLE}.id",
+        )
         clauses.append(predicate.sql)
         params.extend(predicate.params)
 
@@ -919,6 +1077,14 @@ class GtsCentre:
         try:
             goal = await self._require_goal_manageable(
                 principal, goal_id, conn, actor=actor, action="set_goal_priority"
+            )
+            self._require_item_owner(
+                principal,
+                goal.owner_user_id,
+                actor=actor,
+                action="change a goal's priority",
+                target_kind="goal",
+                target_ref=goal.id,
             )
             row = await conn.fetchrow(
                 f"""
@@ -958,6 +1124,14 @@ class GtsCentre:
                 raise PermissionError(
                     f"Goal {goal_id} not found or not visible to {principal.user_id}"
                 )
+            self._require_item_owner(
+                principal,
+                goal.owner_user_id,
+                actor=actor,
+                action="reparent a goal",
+                target_kind="goal",
+                target_ref=goal_id,
+            )
             if new_parent_goal_id is None:
                 self._require_user(
                     actor,
@@ -1032,7 +1206,12 @@ class GtsCentre:
         goal_id: str,
         conn: "asyncpg.Connection",
     ) -> Optional[GtsGoal]:
-        predicate = scope_filter(principal, start_index=2)
+        predicate = scope_filter(
+            principal,
+            start_index=2,
+            grant_item_kind="goal",
+            id_column=f"{GOALS_TABLE}.id",
+        )
         row = await conn.fetchrow(
             f"""
             SELECT {_GOAL_COLUMNS} FROM {GOALS_TABLE}
@@ -1156,9 +1335,10 @@ class GtsCentre:
         task_id: str,
         new_parent_task_id: Optional[str],
         *,
+        actor: GtsActor = "user",
         connection: Optional["asyncpg.Connection"] = None,
     ) -> GtsTask:
-        """Move a task under a new parent task, cycle-safe."""
+        """Move a task under a new parent task, cycle-safe (owner-only, FG-19)."""
         own = connection is None
         conn = connection or await self._connect()
         try:
@@ -1167,6 +1347,14 @@ class GtsCentre:
                 raise PermissionError(
                     f"Task {task_id} not found or not visible to {principal.user_id}"
                 )
+            self._require_item_owner(
+                principal,
+                task.owner_user_id,
+                actor=actor,
+                action="reparent a task",
+                target_kind="task",
+                target_ref=task_id,
+            )
             if new_parent_task_id is not None:
                 if new_parent_task_id == task_id:
                     raise GtsCycleError("A task cannot be its own parent")
@@ -1206,7 +1394,12 @@ class GtsCentre:
         task_id: str,
         conn: "asyncpg.Connection",
     ) -> Optional[GtsTask]:
-        predicate = scope_filter(principal, start_index=2)
+        predicate = scope_filter(
+            principal,
+            start_index=2,
+            grant_item_kind="task",
+            id_column=f"{TASKS_TABLE}.id",
+        )
         row = await conn.fetchrow(
             f"""
             SELECT {_TASK_COLUMNS} FROM {TASKS_TABLE}
@@ -1384,7 +1577,13 @@ class GtsCentre:
         connection: Optional["asyncpg.Connection"] = None,
     ) -> List[GtsGoal]:
         """Goals linked to a task, restricted to those ``principal`` may read."""
-        predicate = scope_filter(principal, column="g.visibility", start_index=2)
+        predicate = scope_filter(
+            principal,
+            column="g.visibility",
+            start_index=2,
+            grant_item_kind="goal",
+            id_column="g.id",
+        )
         own = connection is None
         conn = connection or await self._connect()
         try:
@@ -1513,8 +1712,18 @@ class GtsCentre:
         own = connection is None
         conn = connection or await self._connect()
         try:
-            await self._require_target_readable(
+            node = await self._require_target_node(
                 principal, target_kind, target_id, conn
+            )
+            # The evaluation method is user-owned (FG-18); a grantee
+            # (assignee/watcher) who can read the item may NOT change it.
+            self._require_item_owner(
+                principal,
+                node.owner_user_id,
+                actor=actor,
+                action="set an evaluation method",
+                target_kind=target_kind,
+                target_ref=target_id,
             )
             row = await conn.fetchrow(
                 f"""
@@ -1600,6 +1809,26 @@ class GtsCentre:
                 f"{principal.user_id}"
             )
 
+    async def _require_target_node(
+        self,
+        principal: Principal,
+        target_kind: str,
+        target_id: str,
+        conn: "asyncpg.Connection",
+    ) -> "GtsGoal | GtsTask":
+        """Return the readable goal/task node, or raise ``PermissionError``."""
+        node = (
+            await self._get_goal_node(principal, target_id, conn)
+            if target_kind == "goal"
+            else await self._get_task_node(principal, target_id, conn)
+        )
+        if node is None:
+            raise PermissionError(
+                f"{target_kind} {target_id} not found or not visible to "
+                f"{principal.user_id}"
+            )
+        return node
+
     async def _target_readable(
         self,
         principal: Principal,
@@ -1643,8 +1872,19 @@ class GtsCentre:
         own = connection is None
         conn = connection or await self._connect()
         try:
-            await self._require_target_readable(
+            node = await self._require_target_node(
                 principal, target_kind, target_id, conn
+            )
+            # Recording observed state IS advancing progress (FG-19): allowed
+            # for the item owner and its single active assignee, but not a
+            # read-only watcher.
+            await self._require_progress_authority(
+                principal,
+                target_kind,
+                node,
+                conn,
+                actor=actor,
+                action="record an observation",
             )
             table = GOALS_TABLE if target_kind == "goal" else TASKS_TABLE
             await conn.execute(
@@ -1702,6 +1942,744 @@ class GtsCentre:
             target_id,
         )
         return _load_method(raw)
+
+    # -- assignment lifecycle + per-item grants (FG-19) --------------------
+
+    async def assign(
+        self,
+        principal: Principal,
+        item_kind: str,
+        item_id: str,
+        assignee_user_id: str,
+        *,
+        grant: str = GRANT_ASSIGNEE,
+        actor: GtsActor = "user",
+        require_acceptance: bool = False,
+        approval_callback: Optional[ApprovalCallback] = None,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> ItemGrant:
+        """Grant a task or sub-goal to ``assignee_user_id`` (FG-19).
+
+        A **per-item grant** — it shares this one item, never the owner's other
+        private GTS, and does not touch the item's ``visibility``. Only the item
+        owner (or the owner role) may assign; a top-level goal is not assignable.
+        ``grant`` is ``assignee`` (single, may progress) or ``watcher``
+        (read-only). A user-initiated assignment auto-accepts by default (still
+        declinable); ``require_acceptance`` (and every agent-initiated
+        assignment) leaves it ``pending`` until the grantee accepts. An
+        agent-initiated assignment must clear C6 approval first. Emits a C5/C8
+        audit row and a C6 notification.
+        """
+        if item_kind not in GRANT_ITEM_KINDS:
+            raise ValueError(f"Unknown grant item_kind: {item_kind!r}")
+        if grant not in GRANT_TYPES:
+            raise ValueError(f"Unknown grant type: {grant!r}")
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            node = await self._require_target_node(
+                principal, item_kind, item_id, conn
+            )
+            await self._authorize_assignment(
+                principal,
+                node,
+                item_kind=item_kind,
+                item_id=item_id,
+                assignee_user_id=assignee_user_id,
+                actor=actor,
+                action="assign an item",
+                approval_callback=approval_callback,
+            )
+            if grant == GRANT_ASSIGNEE:
+                existing = await self._active_assignee(conn, item_kind, item_id)
+                if existing is not None and existing != assignee_user_id:
+                    raise GtsAssignmentError(
+                        f"{item_kind} {item_id} already has an active assignee "
+                        f"({existing!r}); use reassign() to change it."
+                    )
+            status = "pending" if (require_acceptance or actor == "agent") else "accepted"
+            record = await self._write_grant(
+                conn,
+                item_kind=item_kind,
+                item_id=item_id,
+                user_id=assignee_user_id,
+                grant=grant,
+                granted_by=principal.user_id,
+                status=status,
+            )
+            if grant == GRANT_ASSIGNEE:
+                await self._sync_assignee_column(conn, item_kind, item_id)
+            self._audit(
+                actor=actor,
+                actor_user_id=principal.user_id,
+                action="assign",
+                target_kind=item_kind,
+                target_ref=item_id,
+                decision="recorded",
+                reason=(
+                    f"{principal.user_id} assigned {item_kind} {item_id} to "
+                    f"{assignee_user_id} as {grant} (status={status}, {actor})"
+                ),
+            )
+            self._notify_assignment(record, action="assign", by_user_id=principal.user_id)
+            return record
+        finally:
+            if own:
+                await conn.close()
+
+    async def reassign(
+        self,
+        principal: Principal,
+        item_kind: str,
+        item_id: str,
+        new_assignee_user_id: str,
+        *,
+        actor: GtsActor = "user",
+        require_acceptance: bool = False,
+        approval_callback: Optional[ApprovalCallback] = None,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> ItemGrant:
+        """Move the single assignee grant to ``new_assignee_user_id`` (FG-19).
+
+        Owner-only (an assignee may not reassign). Revokes the current active
+        assignee grant (audited) then assigns the new one, preserving the
+        single-active-assignee invariant. Agent-initiated reassignment clears
+        C6 approval first.
+        """
+        if item_kind not in GRANT_ITEM_KINDS:
+            raise ValueError(f"Unknown grant item_kind: {item_kind!r}")
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            async with conn.transaction():
+                node = await self._require_target_node(
+                    principal, item_kind, item_id, conn
+                )
+                await self._authorize_assignment(
+                    principal,
+                    node,
+                    item_kind=item_kind,
+                    item_id=item_id,
+                    assignee_user_id=new_assignee_user_id,
+                    actor=actor,
+                    action="reassign an item",
+                    approval_callback=approval_callback,
+                )
+                current = await self._active_assignee(conn, item_kind, item_id)
+                if current is not None and current != new_assignee_user_id:
+                    await conn.execute(
+                        f"""
+                        UPDATE {ITEM_GRANTS_TABLE}
+                        SET status = 'revoked', updated_at = NOW()
+                        WHERE item_kind = $1 AND item_id = $2
+                          AND grant_type = 'assignee' AND user_id = $3
+                          AND status = ANY($4::text[])
+                        """,
+                        item_kind,
+                        item_id,
+                        current,
+                        list(GRANT_ACTIVE_STATUSES),
+                    )
+                    self._audit(
+                        actor=actor,
+                        actor_user_id=principal.user_id,
+                        action="reassign",
+                        target_kind=item_kind,
+                        target_ref=item_id,
+                        decision="recorded",
+                        reason=(
+                            f"{principal.user_id} revoked assignee {current} of "
+                            f"{item_kind} {item_id} before reassigning"
+                        ),
+                    )
+                status = (
+                    "pending" if (require_acceptance or actor == "agent") else "accepted"
+                )
+                record = await self._write_grant(
+                    conn,
+                    item_kind=item_kind,
+                    item_id=item_id,
+                    user_id=new_assignee_user_id,
+                    grant=GRANT_ASSIGNEE,
+                    granted_by=principal.user_id,
+                    status=status,
+                )
+                await self._sync_assignee_column(conn, item_kind, item_id)
+                self._audit(
+                    actor=actor,
+                    actor_user_id=principal.user_id,
+                    action="reassign",
+                    target_kind=item_kind,
+                    target_ref=item_id,
+                    decision="recorded",
+                    reason=(
+                        f"{principal.user_id} reassigned {item_kind} {item_id} to "
+                        f"{new_assignee_user_id} (status={status}, {actor})"
+                    ),
+                )
+            self._notify_assignment(record, action="reassign", by_user_id=principal.user_id)
+            return record
+        finally:
+            if own:
+                await conn.close()
+
+    async def accept_assignment(
+        self,
+        principal: Principal,
+        grant_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> ItemGrant:
+        """Accept a grant addressed to ``principal`` (grantee-only, FG-19)."""
+        return await self._resolve_grant(
+            principal, grant_id, new_status="accepted", action="accept"
+        )
+
+    async def decline_assignment(
+        self,
+        principal: Principal,
+        grant_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> ItemGrant:
+        """Decline a grant addressed to ``principal`` (grantee-only, FG-19)."""
+        return await self._resolve_grant(
+            principal, grant_id, new_status="declined", action="decline"
+        )
+
+    async def revoke_grant(
+        self,
+        principal: Principal,
+        grant_id: str,
+        *,
+        actor: GtsActor = "user",
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> ItemGrant:
+        """Revoke a grant — the item owner (or owner role) only (FG-19)."""
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            grant = await self._grant_by_id(conn, grant_id)
+            if grant is None:
+                raise GtsAssignmentError(f"Grant {grant_id} not found")
+            node = await self._require_target_node(
+                principal, grant.item_kind, grant.item_id, conn
+            )
+            self._require_item_owner(
+                principal,
+                node.owner_user_id,
+                actor=actor,
+                action="revoke a grant",
+                target_kind=grant.item_kind,
+                target_ref=grant.item_id,
+            )
+            updated = await self._set_grant_status(conn, grant_id, "revoked")
+            if updated.grant == GRANT_ASSIGNEE:
+                await self._sync_assignee_column(
+                    conn, updated.item_kind, updated.item_id
+                )
+            self._audit(
+                actor=actor,
+                actor_user_id=principal.user_id,
+                action="revoke",
+                target_kind=updated.item_kind,
+                target_ref=updated.item_id,
+                decision="recorded",
+                reason=(
+                    f"{principal.user_id} revoked {updated.grant} grant of "
+                    f"{updated.item_kind} {updated.item_id} from {updated.user_id}"
+                ),
+            )
+            self._notify_assignment(updated, action="revoke", by_user_id=principal.user_id)
+            return updated
+        finally:
+            if own:
+                await conn.close()
+
+    async def list_grants(
+        self,
+        principal: Principal,
+        item_kind: str,
+        item_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> List[ItemGrant]:
+        """List grants on a readable item (owner/grantee scope via item_grants RLS)."""
+        if item_kind not in GRANT_ITEM_KINDS:
+            raise ValueError(f"Unknown grant item_kind: {item_kind!r}")
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            if await self._target_node_or_none(
+                principal, item_kind, item_id, conn
+            ) is None:
+                return []
+            rows = await conn.fetch(
+                f"""
+                SELECT id, item_kind, item_id, user_id, grant_type,
+                       granted_by, status
+                FROM {ITEM_GRANTS_TABLE}
+                WHERE item_kind = $1 AND item_id = $2
+                ORDER BY created_at ASC
+                """,
+                item_kind,
+                item_id,
+            )
+            return [_row_to_item_grant(r) for r in rows]
+        finally:
+            if own:
+                await conn.close()
+
+    async def advance_task(
+        self,
+        principal: Principal,
+        task_id: str,
+        to_state: str,
+        *,
+        actor: GtsActor = "user",
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> GtsTask:
+        """Advance a task's progress state — owner or active assignee (FG-19).
+
+        A grant-aware wrapper of the FG-06 progress machine: it authorizes the
+        item owner or its single active assignee (a watcher is refused), then
+        applies the validated transition and records it. Progress feeds the
+        automatic FG-18 score rollup; it never hand-sets a score.
+        """
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            node = await self._get_task_node(principal, task_id, conn)
+            if node is None:
+                raise PermissionError(
+                    f"Task {task_id} not found or not visible to {principal.user_id}"
+                )
+            await self._require_progress_authority(
+                principal, "task", node, conn, actor=actor, action="advance a task"
+            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""
+                    SELECT current_state, trigger_state, completion_state
+                    FROM {TASKS_TABLE} WHERE id = $1 FOR UPDATE
+                    """,
+                    task_id,
+                )
+                if row is None:
+                    raise PermissionError(f"Task {task_id} not found")
+                progress_rows = await conn.fetch(
+                    """
+                    SELECT name FROM task_progress_states
+                    WHERE task_id = $1 ORDER BY ordinal
+                    """,
+                    task_id,
+                )
+                validate_progress_transition(
+                    tuple(str(item["name"]) for item in progress_rows),
+                    str(row["current_state"]),
+                    to_state,
+                )
+                status = _status_for_state(
+                    to_state,
+                    trigger_state=str(row["trigger_state"]),
+                    completion_state=str(row["completion_state"]),
+                )
+                updated = await conn.fetchrow(
+                    f"""
+                    UPDATE {TASKS_TABLE}
+                    SET current_state = $2, status = $3, updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING {_TASK_COLUMNS}
+                    """,
+                    task_id,
+                    to_state,
+                    status,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO task_transitions
+                        (task_id, from_state, to_state, actor)
+                    VALUES ($1, $2, $3, $4)
+                    """,
+                    task_id,
+                    row["current_state"],
+                    to_state,
+                    principal.user_id,
+                )
+            self._audit(
+                actor=actor,
+                actor_user_id=principal.user_id,
+                action="progress",
+                target_kind="task",
+                target_ref=task_id,
+                decision="recorded",
+                reason=(
+                    f"{principal.user_id} advanced task {task_id} to {to_state} "
+                    f"({actor})"
+                ),
+            )
+            return _row_to_task_node(updated)
+        finally:
+            if own:
+                await conn.close()
+
+    # -- grant internals ---------------------------------------------------
+
+    async def _authorize_assignment(
+        self,
+        principal: Principal,
+        node: "GtsGoal | GtsTask",
+        *,
+        item_kind: str,
+        item_id: str,
+        assignee_user_id: str,
+        actor: GtsActor,
+        action: str,
+        approval_callback: Optional[ApprovalCallback],
+    ) -> None:
+        """Shared assign/reassign gate: owner-only + top-level guard + C6."""
+        self._require_item_owner(
+            principal,
+            node.owner_user_id,
+            actor=actor,
+            action=action,
+            target_kind=item_kind,
+            target_ref=item_id,
+        )
+        if item_kind == "goal":
+            if not isinstance(node, GtsGoal):  # pragma: no cover - defensive
+                raise GtsAssignmentError(f"Item {item_id} is not a goal")
+            if node.level == "top":
+                raise GtsAssignmentError(
+                    "Top-level goals are not assignable (FG-19); only tasks and "
+                    "sub-goals can be assigned."
+                )
+        if actor == "agent":
+            self._require_assignment_approval(
+                principal,
+                item_kind=item_kind,
+                item_id=item_id,
+                assignee_user_id=assignee_user_id,
+                approval_callback=approval_callback,
+            )
+
+    def _require_assignment_approval(
+        self,
+        principal: Principal,
+        *,
+        item_kind: str,
+        item_id: str,
+        assignee_user_id: str,
+        approval_callback: Optional[ApprovalCallback],
+    ) -> None:
+        """C6 gate for agent-initiated assignment (reuses ``evaluate_approval``)."""
+        decision = evaluate_approval(
+            self._consent_policy,
+            reversible=True,
+            command=f"gts.assign {item_kind}:{item_id} -> {assignee_user_id}",
+            description=(
+                f"Agent-initiated cross-user GTS assignment of {item_kind} "
+                f"{item_id} to {assignee_user_id}"
+            ),
+            approval_callback=approval_callback,
+        )
+        if not decision.approved:
+            self._audit(
+                actor="agent",
+                actor_user_id=principal.user_id,
+                action="assign",
+                target_kind=item_kind,
+                target_ref=item_id,
+                decision="refused",
+                reason=(
+                    f"agent-initiated assignment to {assignee_user_id} denied by "
+                    f"C6 ({decision.reason})"
+                ),
+            )
+            raise GtsAuthorityError(
+                "Refused: agent-initiated assignment requires C6 approval and the "
+                "request was not approved. This attempt has been audited."
+            )
+
+    async def _resolve_grant(
+        self,
+        principal: Principal,
+        grant_id: str,
+        *,
+        new_status: str,
+        action: str,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> ItemGrant:
+        """Grantee-only accept/decline of a grant addressed to ``principal``."""
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            grant = await self._grant_by_id(conn, grant_id)
+            if grant is None:
+                raise GtsAssignmentError(f"Grant {grant_id} not found")
+            if not (principal.is_owner or grant.user_id == principal.user_id):
+                self._audit(
+                    actor="user",
+                    actor_user_id=principal.user_id,
+                    action=action,
+                    target_kind=grant.item_kind,
+                    target_ref=grant.item_id,
+                    decision="refused",
+                    reason=(
+                        f"only the grantee ({grant.user_id}) may {action} this "
+                        f"grant"
+                    ),
+                )
+                raise GtsAuthorityError(
+                    f"Refused: only the grantee may {action} this grant (FG-19). "
+                    "This attempt has been audited."
+                )
+            if grant.status not in GRANT_ACTIVE_STATUSES:
+                raise GtsAssignmentError(
+                    f"Grant {grant_id} is {grant.status}; cannot {action}"
+                )
+            updated = await self._set_grant_status(conn, grant_id, new_status)
+            if updated.grant == GRANT_ASSIGNEE:
+                await self._sync_assignee_column(
+                    conn, updated.item_kind, updated.item_id
+                )
+            self._audit(
+                actor="user",
+                actor_user_id=principal.user_id,
+                action=action,
+                target_kind=updated.item_kind,
+                target_ref=updated.item_id,
+                decision="recorded",
+                reason=(
+                    f"{principal.user_id} {action}ed {updated.grant} grant of "
+                    f"{updated.item_kind} {updated.item_id} (granted by "
+                    f"{updated.granted_by})"
+                ),
+            )
+            self._notify_assignment(updated, action=action, by_user_id=principal.user_id)
+            return updated
+        finally:
+            if own:
+                await conn.close()
+
+    async def _write_grant(
+        self,
+        conn: "asyncpg.Connection",
+        *,
+        item_kind: str,
+        item_id: str,
+        user_id: str,
+        grant: str,
+        granted_by: str,
+        status: str,
+    ) -> ItemGrant:
+        row = await conn.fetchrow(
+            f"""
+            INSERT INTO {ITEM_GRANTS_TABLE}
+                (item_kind, item_id, user_id, grant_type, granted_by, status)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (item_kind, item_id, user_id) DO UPDATE SET
+                grant_type = EXCLUDED.grant_type,
+                granted_by = EXCLUDED.granted_by,
+                status = EXCLUDED.status,
+                updated_at = NOW()
+            RETURNING id, item_kind, item_id, user_id, grant_type,
+                      granted_by, status
+            """,
+            item_kind,
+            item_id,
+            user_id,
+            grant,
+            granted_by,
+            status,
+        )
+        return _row_to_item_grant(row)
+
+    async def _set_grant_status(
+        self,
+        conn: "asyncpg.Connection",
+        grant_id: str,
+        status: str,
+    ) -> ItemGrant:
+        row = await conn.fetchrow(
+            f"""
+            UPDATE {ITEM_GRANTS_TABLE}
+            SET status = $2, updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, item_kind, item_id, user_id, grant_type,
+                      granted_by, status
+            """,
+            grant_id,
+            status,
+        )
+        if row is None:
+            raise GtsAssignmentError(f"Grant {grant_id} not found")
+        return _row_to_item_grant(row)
+
+    async def _grant_by_id(
+        self,
+        conn: "asyncpg.Connection",
+        grant_id: str,
+    ) -> Optional[ItemGrant]:
+        row = await conn.fetchrow(
+            f"""
+            SELECT id, item_kind, item_id, user_id, grant_type,
+                   granted_by, status
+            FROM {ITEM_GRANTS_TABLE} WHERE id = $1
+            """,
+            grant_id,
+        )
+        return _row_to_item_grant(row) if row is not None else None
+
+    async def _active_assignee(
+        self,
+        conn: "asyncpg.Connection",
+        item_kind: str,
+        item_id: str,
+    ) -> Optional[str]:
+        val = await conn.fetchval(
+            f"""
+            SELECT user_id FROM {ITEM_GRANTS_TABLE}
+            WHERE item_kind = $1 AND item_id = $2
+              AND grant_type = 'assignee' AND status = ANY($3::text[])
+            LIMIT 1
+            """,
+            item_kind,
+            item_id,
+            list(GRANT_ACTIVE_STATUSES),
+        )
+        return str(val) if val is not None else None
+
+    async def _sync_assignee_column(
+        self,
+        conn: "asyncpg.Connection",
+        item_kind: str,
+        item_id: str,
+    ) -> None:
+        """Mirror the active assignee onto the row's ``assignee_user_id``."""
+        table = GOALS_TABLE if item_kind == "goal" else TASKS_TABLE
+        assignee = await self._active_assignee(conn, item_kind, item_id)
+        await conn.execute(
+            f"UPDATE {table} SET assignee_user_id = $2, updated_at = NOW() "
+            f"WHERE id = $1",
+            item_id,
+            assignee,
+        )
+
+    async def _require_progress_authority(
+        self,
+        principal: Principal,
+        item_kind: str,
+        node: "GtsGoal | GtsTask",
+        conn: "asyncpg.Connection",
+        *,
+        actor: GtsActor,
+        action: str,
+    ) -> None:
+        """Allow progress by the item owner or its single active assignee.
+
+        A read-only watcher — or any non-grantee — is refused and audited. This
+        is the one authority seam an assignee is *granted* (unlike content /
+        evaluation-method / assignment edits, which stay owner-only).
+        """
+        if self._is_item_owner(principal, node.owner_user_id):
+            return
+        assignee = await self._active_assignee(conn, item_kind, node.id)
+        if assignee == principal.user_id:
+            return
+        self._audit(
+            actor=actor,
+            actor_user_id=principal.user_id,
+            action=action,
+            target_kind=item_kind,
+            target_ref=node.id,
+            decision="refused",
+            reason=(
+                f"{action} on {item_kind} {node.id} is limited to the owner or "
+                "active assignee (a watcher/non-grantee may not, FG-19)"
+            ),
+        )
+        raise GtsAuthorityError(
+            f"Refused: only the item owner or its assignee may {action}; a "
+            "watcher/non-grantee may not (FG-19). This attempt has been audited."
+        )
+
+    async def _target_node_or_none(
+        self,
+        principal: Principal,
+        item_kind: str,
+        item_id: str,
+        conn: "asyncpg.Connection",
+    ) -> "GtsGoal | GtsTask | None":
+        if item_kind == "goal":
+            return await self._get_goal_node(principal, item_id, conn)
+        return await self._get_task_node(principal, item_id, conn)
+
+    def _notify_assignment(
+        self,
+        grant: ItemGrant,
+        *,
+        action: str,
+        by_user_id: str,
+    ) -> None:
+        """Best-effort C6 assignment notification (FG-19); never raises."""
+        if self._notifier is None:
+            return
+        payload = {
+            "kind": "gts_assignment",
+            "action": action,
+            "item_kind": grant.item_kind,
+            "item_id": grant.item_id,
+            "grant": grant.grant,
+            "assignee_user_id": grant.user_id,
+            "status": grant.status,
+            "by_user_id": by_user_id,
+        }
+        try:
+            self._notifier(payload)
+        except Exception:
+            logger.exception("GTS assignment notifier failed (non-fatal)")
+
+    # -- owner cross-user browse (FG-19) -----------------------------------
+
+    async def list_goals_for_user(
+        self,
+        principal: Principal,
+        subject_user_id: str,
+        *,
+        top_level_only: bool = False,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> List[GtsGoal]:
+        """Owner-only cross-user browse: list ``subject_user_id``'s goals.
+
+        The owner role sees every user's GTS (the existing C2 owner bypass);
+        this narrows that view to one subject user for the owner cross-user
+        browse surface (rendered by FG-17). A non-owner is refused — it may
+        never enumerate another user's private GTS.
+        """
+        if not principal.is_owner:
+            raise GtsAuthorityError(
+                "Refused: cross-user GTS browse is owner-only (FG-19)."
+            )
+        clauses = ["owner_user_id = $1"]
+        if top_level_only:
+            clauses.append("parent_goal_id IS NULL")
+        where = " AND ".join(clauses)
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            rows = await conn.fetch(
+                f"""
+                SELECT {_GOAL_COLUMNS} FROM {GOALS_TABLE}
+                WHERE {where}
+                ORDER BY created_at ASC
+                """,
+                subject_user_id,
+            )
+            return [_row_to_goal_node(r) for r in rows]
+        finally:
+            if own:
+                await conn.close()
 
     # -- scoring (always computed; clamped; rolled up) ---------------------
 
@@ -1923,13 +2901,13 @@ class GtsCentre:
 
 _GOAL_COLUMNS = (
     "id, owner_user_id, visibility, title, priority, status, "
-    "level, parent_goal_id, score, evaluation_method_ref"
+    "level, parent_goal_id, score, evaluation_method_ref, assignee_user_id"
 )
 
 _TASK_COLUMNS = (
     "id, owner_user_id, visibility, title, priority, status, "
     "current_state, completion_state, parent_task_id, score, "
-    "evaluation_method_ref"
+    "evaluation_method_ref, assignee_user_id"
 )
 
 
@@ -1941,6 +2919,7 @@ def _row_to_goal_node(row: "asyncpg.Record") -> GtsGoal:
     score = row["score"]
     parent = row["parent_goal_id"]
     method_ref = row["evaluation_method_ref"]
+    assignee = row["assignee_user_id"]
     return GtsGoal(
         id=str(row["id"]),
         owner_user_id=str(row["owner_user_id"]),
@@ -1952,6 +2931,7 @@ def _row_to_goal_node(row: "asyncpg.Record") -> GtsGoal:
         parent_goal_id=str(parent) if parent is not None else None,
         score=float(score) if score is not None else None,
         evaluation_method_ref=str(method_ref) if method_ref is not None else None,
+        assignee_user_id=str(assignee) if assignee is not None else None,
     )
 
 
@@ -1959,6 +2939,7 @@ def _row_to_task_node(row: "asyncpg.Record") -> GtsTask:
     score = row["score"]
     parent = row["parent_task_id"]
     method_ref = row["evaluation_method_ref"]
+    assignee = row["assignee_user_id"]
     return GtsTask(
         id=str(row["id"]),
         owner_user_id=str(row["owner_user_id"]),
@@ -1971,6 +2952,19 @@ def _row_to_task_node(row: "asyncpg.Record") -> GtsTask:
         parent_task_id=str(parent) if parent is not None else None,
         score=float(score) if score is not None else None,
         evaluation_method_ref=str(method_ref) if method_ref is not None else None,
+        assignee_user_id=str(assignee) if assignee is not None else None,
+    )
+
+
+def _row_to_item_grant(row: "asyncpg.Record") -> ItemGrant:
+    return ItemGrant(
+        id=str(row["id"]),
+        item_kind=str(row["item_kind"]),
+        item_id=str(row["item_id"]),
+        user_id=str(row["user_id"]),
+        grant=str(row["grant_type"]),
+        granted_by=str(row["granted_by"]),
+        status=str(row["status"]),
     )
 
 
@@ -2081,22 +3075,28 @@ def _append_local_audit(event: GtsAuditEvent) -> None:
 
 
 __all__ = [
+    "ASSIGNMENT_ACTIONS",
     "EVALUATION_METHODS_TABLE",
     "GOAL_LEVELS",
+    "GRANT_ASSIGNEE",
+    "GRANT_WATCHER",
     "OBSERVATION_SOURCES",
     "SKILLS_TABLE",
     "TASK_GOALS_TABLE",
     "TASK_SKILLS_TABLE",
     "EvaluationMethod",
     "GtsActor",
+    "GtsAssignmentError",
     "GtsAuditEvent",
     "GtsAuthorityError",
     "GtsCentre",
     "GtsCycleError",
     "GtsError",
     "GtsGoal",
+    "GtsNotifier",
     "GtsScoreEvaluator",
     "GtsTask",
+    "ItemGrant",
     "ObservationSource",
     "ObservationSpec",
     "ScoringRequest",
