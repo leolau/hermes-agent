@@ -1345,6 +1345,40 @@ export const api = {
   // FG-15 onboarding readiness (first-run wizard).
   getOnboardingReadiness: () =>
     fetchJSON<OnboardingReadinessResponse>("/api/onboarding/readiness"),
+
+  // FG-17b agent webview (CDP) — consent-gated (C6) + traced (C8). Default-deny:
+  // nothing runs until a session is opened with an explicit consent scope.
+  getWebviewSession: (opts?: { as?: string }) => {
+    const qs = opts?.as ? `?as=${encodeURIComponent(opts.as)}` : "";
+    return fetchJSON<WebviewSessionResponse>(`/api/webview/session${qs}`);
+  },
+  openWebviewSession: (scope: {
+    allowed_domains: string[];
+    mode: "read_only" | "interactive";
+  }) =>
+    fetchJSON<WebviewSessionResponse>("/api/webview/session", {
+      method: "POST",
+      body: JSON.stringify(scope),
+    }),
+  closeWebviewSession: () =>
+    fetchJSON<{ ok: boolean; closed: boolean }>("/api/webview/session", {
+      method: "DELETE",
+    }),
+  requestWebviewAction: (action: {
+    kind: string;
+    url?: string | null;
+    credentialed?: boolean;
+    destructive?: boolean;
+  }) =>
+    fetchJSON<WebviewActionResponse>("/api/webview/action", {
+      method: "POST",
+      body: JSON.stringify(action),
+    }),
+  resolveWebviewApproval: (approvalId: string, grant: boolean) =>
+    fetchJSON<WebviewActionResponse>(
+      `/api/webview/approval/${encodeURIComponent(approvalId)}`,
+      { method: "POST", body: JSON.stringify({ grant }) },
+    ),
 };
 
 export type CommsNotificationKind = "approval" | "proactive_ask";
@@ -1579,6 +1613,17 @@ export interface GtsEvaluationMethod {
   scoring_prompt: string;
 }
 
+// FG-19 per-item grant (assignee + read-only watchers) attached to a node.
+export interface GtsItemGrant {
+  id: string;
+  item_kind: string;
+  item_id: string;
+  user_id: string;
+  grant: "assignee" | "watcher" | string;
+  granted_by: string;
+  status: string;
+}
+
 export interface GtsGoal {
   id: string;
   owner_user_id: string;
@@ -1590,6 +1635,8 @@ export interface GtsGoal {
   parent_goal_id: string | null;
   score: number | null;
   evaluation_method: GtsEvaluationMethod;
+  assignee_user_id: string | null;
+  grants: GtsItemGrant[];
 }
 
 export interface GtsTask {
@@ -1603,6 +1650,8 @@ export interface GtsTask {
   parent_task_id: string | null;
   score: number | null;
   evaluation_method: GtsEvaluationMethod;
+  assignee_user_id: string | null;
+  grants: GtsItemGrant[];
 }
 
 export interface GtsSkill {
@@ -1648,6 +1697,48 @@ export interface OnboardingReadinessResponse {
   optional_coverage: number;
   missing_required: string[];
   items: OnboardingItem[];
+}
+
+// ── FG-17b agent webview (CDP) — consent-gated (C6) + traced (C8) ────
+export interface WebviewScope {
+  allowed_domains: string[];
+  mode: "read_only" | "interactive";
+}
+
+export interface WebviewPendingApproval {
+  id: string;
+  kind: string;
+  url: string | null;
+  credentialed?: boolean;
+  destructive?: boolean;
+  reason: string;
+  created_at: number;
+  resolved?: boolean | null;
+}
+
+export interface WebviewSession {
+  id: string;
+  owner_user_id: string;
+  scope: WebviewScope;
+  profile_dir?: string;
+  created_at: number;
+  trace_id: string;
+  pending: WebviewPendingApproval[];
+}
+
+export interface WebviewSessionResponse {
+  configured: boolean;
+  principal?: string | null;
+  session: WebviewSession | null;
+}
+
+export interface WebviewActionResponse {
+  decision: "allow" | "escalate" | "deny";
+  reason: string;
+  executed?: boolean;
+  detail?: string;
+  granted?: boolean;
+  approval?: WebviewPendingApproval;
 }
 
 /** Identity payload returned by ``GET /api/auth/me`` (Phase 7).

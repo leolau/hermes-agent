@@ -43,6 +43,7 @@ import {
   Puzzle,
   Radio,
   RotateCw,
+  Send,
   Settings,
   Shield,
   ShieldCheck,
@@ -97,6 +98,8 @@ import CommsPage from "@/screens/CommsPage";
 import CorePage from "@/screens/CorePage";
 import GtsCentrePage from "@/screens/GtsCentrePage";
 import OnboardingPage from "@/screens/OnboardingPage";
+import WebviewPage from "@/screens/WebviewPage";
+import TelegramPage from "@/screens/TelegramPage";
 import ChatPage from "@/screens/ChatPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
@@ -154,6 +157,8 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/core": CorePage,
   "/gts": GtsCentrePage,
   "/onboarding": OnboardingPage,
+  "/webview": WebviewPage,
+  "/telegram": TelegramPage,
   "/channels": ChannelsPage,
   "/webhooks": WebhooksPage,
   "/system": SystemPage,
@@ -205,6 +210,8 @@ const BUILTIN_NAV_REST: NavItem[] = [
   { path: "/onboarding", label: "Getting started", icon: Sparkles },
   { path: "/core", label: "Core area", icon: Shield },
   { path: "/gts", label: "GTS Centre", icon: Target },
+  { path: "/telegram", label: "Telegram", icon: Send },
+  { path: "/webview", label: "Agent webview", icon: Globe },
   { path: "/profiles", labelKey: "profiles", label: "Profiles", icon: Users },
   { path: "/config", labelKey: "config", label: "Config", icon: Settings },
   { path: "/env", labelKey: "keys", label: "Keys", icon: KeyRound },

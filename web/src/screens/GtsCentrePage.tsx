@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Gauge, ListTree, Target, Wrench } from "lucide-react";
+import { Eye, Gauge, ListTree, Target, UserCheck, Wrench } from "lucide-react";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { H2 } from "@nous-research/ui/ui/components/typography/h2";
@@ -10,8 +10,41 @@ import type {
   GtsEvaluationMethod,
   GtsGoal,
   GtsGraphResponse,
+  GtsItemGrant,
   GtsTask,
 } from "@/lib/api";
+
+// FG-19: show the active assignee + read-only watcher count on a node. A grant
+// only confers access while pending/accepted, so declined/revoked are hidden.
+function AssignmentBadges({
+  assigneeUserId,
+  grants,
+}: {
+  assigneeUserId: string | null;
+  grants: GtsItemGrant[];
+}) {
+  const active = grants.filter(
+    (g) => g.status === "accepted" || g.status === "pending",
+  );
+  const watchers = active.filter((g) => g.grant === "watcher");
+  if (!assigneeUserId && watchers.length === 0) return null;
+  return (
+    <>
+      {assigneeUserId ? (
+        <Badge tone="secondary">
+          <UserCheck className="mr-1 h-3 w-3" />
+          {assigneeUserId}
+        </Badge>
+      ) : null}
+      {watchers.length > 0 ? (
+        <Badge tone="secondary">
+          <Eye className="mr-1 h-3 w-3" />
+          {watchers.length}
+        </Badge>
+      ) : null}
+    </>
+  );
+}
 
 const PRIORITY_TONE: Record<string, "success" | "warning" | "secondary"> = {
   high: "warning",
@@ -153,6 +186,10 @@ export default function GtsCentrePage() {
               <Badge tone="secondary">{goal.status}</Badge>
               <Badge tone="secondary">{goal.level}</Badge>
               <Badge tone="secondary">{goal.visibility}</Badge>
+              <AssignmentBadges
+                assigneeUserId={goal.assignee_user_id}
+                grants={goal.grants}
+              />
             </div>
             <ScoreBadge score={goal.score} />
           </div>
@@ -172,6 +209,10 @@ export default function GtsCentrePage() {
                         {task.priority}
                       </Badge>
                       <Badge tone="secondary">{task.current_state}</Badge>
+                      <AssignmentBadges
+                        assigneeUserId={task.assignee_user_id}
+                        grants={task.grants}
+                      />
                       <ScoreBadge score={task.score} />
                     </div>
                     {linkedSkillIds.length > 0 ? (
@@ -236,10 +277,7 @@ export default function GtsCentrePage() {
       {graph?.configured ? (
         <div className="text-xs text-muted-foreground">
           Assignment: {graph.assignment.scheme}
-          {graph.assignment.enabled
-            ? " (per-user, FG-19)"
-            : " — per-user assignment (FG-19) not yet wired"}
-          .
+          {graph.assignment.enabled ? " (FG-19: assignee + watchers)" : ""}.
         </div>
       ) : null}
     </div>

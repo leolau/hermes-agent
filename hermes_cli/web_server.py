@@ -33,6 +33,7 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+import uuid
 import zipfile
 
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
@@ -42,6 +43,12 @@ from typing import Any, cast, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from hermes_cli.gts import EvaluationMethod
+    from hermes_cli.access import Principal
+    from hermes_cli.webview import (
+        WebviewAction,
+        WebviewRegistry,
+        WebviewSession,
+    )
 
 import yaml
 
@@ -3609,9 +3616,10 @@ async def gts_graph_view(request: Request):
     node's user-owned observe/measure evaluation method (never the score, which
     is always engine-computed). The GTS Centre is Core (D14): its data is read
     here, never mutated — creation/scoring stay on the CLI/agent authority
-    paths. Per-user assignment (FG-19) is not yet merged, so this is the
-    single-owner view scoped through the existing C2 ``?as=`` seam; the
-    ``assignment`` block is the clean seam a future FG-19 wire-up fills in.
+    paths. Per-user assignment (FG-19) is live: each task/sub-goal node carries
+    its ``assignee_user_id`` plus the per-item grants (assignee + watchers)
+    visible to the resolved principal, all scoped through the existing C2
+    ``?as=`` seam and the item_grants RLS.
     """
     from hermes_cli.gts import GtsCentre
 
@@ -3626,7 +3634,7 @@ async def gts_graph_view(request: Request):
             "skills": [],
             "task_goals": [],
             "task_skills": [],
-            "assignment": {"enabled": False, "scheme": "single-owner"},
+            "assignment": {"enabled": True, "scheme": "per-user"},
         }
 
     store = _comms_app_store()
@@ -3643,7 +3651,7 @@ async def gts_graph_view(request: Request):
             "skills": [],
             "task_goals": [],
             "task_skills": [],
-            "assignment": {"enabled": False, "scheme": "single-owner"},
+            "assignment": {"enabled": True, "scheme": "per-user"},
         }
     try:
         await centre.initialize(connection=conn)
@@ -3656,6 +3664,12 @@ async def gts_graph_view(request: Request):
             )
             entry = goal.as_dict()
             entry["evaluation_method"] = _gts_method_summary(method)
+            entry["grants"] = [
+                g.as_dict()
+                for g in await centre.list_grants(
+                    principal, "goal", goal.id, connection=conn
+                )
+            ]
             goal_payload.append(entry)
 
         skills = await centre.list_skills(principal, connection=conn)
@@ -3673,6 +3687,12 @@ async def gts_graph_view(request: Request):
             )
             entry = task.as_dict()
             entry["evaluation_method"] = _gts_method_summary(method)
+            entry["grants"] = [
+                g.as_dict()
+                for g in await centre.list_grants(
+                    principal, "task", task.id, connection=conn
+                )
+            ]
             task_payload.append(entry)
 
             for linked_goal in await centre.goals_for_task(
@@ -3695,10 +3715,11 @@ async def gts_graph_view(request: Request):
         "skills": [skill.as_dict() for skill in skills],
         "task_goals": task_goals,
         "task_skills": task_skills,
-        # FG-19 seam: single-owner today. A future FG-19 wire-up flips
-        # ``enabled`` and populates per-user assignment/grant metadata here
-        # without changing the graph shape above.
-        "assignment": {"enabled": False, "scheme": "single-owner"},
+        # FG-19 (merged): per-user assignment. Node payloads carry
+        # ``assignee_user_id`` and a ``grants`` list (assignee + watchers)
+        # scoped to the principal via item_grants RLS; top-level goals remain
+        # non-assignable.
+        "assignment": {"enabled": True, "scheme": "per-user"},
     }
 
 
