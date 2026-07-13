@@ -1,6 +1,6 @@
 # FG-09 — Management of goals: memory + tasks + tools
 
-**Wave:** 3 (integration) · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** 3 (integration) · **Owner agent:** devin:201d283b · **Status:** Implemented (code + tests green) — merged to `develop`; ECS system test is the remaining owner-gated step
 
 ## Summary
 The **integration layer**: unify **goals** (FG-04) with the **memory** (FG-05),
@@ -69,6 +69,7 @@ Tests green (incl. cross-surface E2E + negative access) + baseline green + `ruff
 | 2026-07-11 | 1 | devin:8cec0d47 | Created FG doc | Plan kickoff |
 | 2026-07-11 | 2 | devin:8cec0d47 | Added System testing (system-test box) section as a per-FG DoD step | Leo: new 4/16 ECS = system-test host (+ prod for now), run after each FG's development |
 | 2026-07-11 | 3 | devin:201d283b | Implemented scoped goal links, one shared four-surface service, cache-safe context, cross-resource propagation, and unit/real-path E2E coverage | Completed the local FG-09 integration gate; ECS/system testing remains pending owner/orchestrator coordination |
+| 2026-07-04 | 4 | devin:3c64bcf2 | Corrected stale header (`Not started` → `Implemented … merged to develop; ECS system test remaining`) | Branch is contained in `develop` and checklist is all `[x]` except the owner-gated ECS test; header was misleading |
 
 ## Cloud-agent prompt
 > **[Wave 3 — start after FG-04, 05, 06, 07, 10, 11 merge]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-09`). Build the **integration layer** that unifies **goals + memory + tasks + tools** and exposes goal management uniformly across **incoming channels, Telegram, the web app, and MCP** via ONE service layer with four front-ends. Add scoped `goal_links(goal_id, resource_kind∈{memory,task,tool}, resource_ref)` (contract C2; owner sees all). Assemble goal context **cache-safely** — pull relevant memory/tasks/tools via tool calls whose results are **appended** (never mutate the system prompt). Propagate cross-resource updates (task done / metric hit → goal; tool retired → dependent goals flagged); channel-sourced management is prod-only (contract C3). Follow `AGENTS.md` (cache-sacred, footprint ladder, extend not duplicate). Add unit + negative-access + **cross-surface E2E** tests; run `scripts/run_tests.sh`, `ruff`, `ty` + web lint/typecheck. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist (in this doc) passes** — coordinate that deploy/run with Leo.
