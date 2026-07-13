@@ -85,18 +85,27 @@ through FG-13. Channels (incl. embedded Telegram) are prod-only per D5.
 Parity tests green (FG-07/10 re-run) + web lint/typecheck + baseline + `ruff`/`ty` clean; Next.js App Router frontend over the unchanged Python API; Core-area view, embedded Telegram (same brain), consent+traced agent webview, and tool link/icon registration all working; dashboard code marked Core (C7); **ECS system test green**.
 
 ## Progress checklist
-- [ ] Next.js (App Router) frontend parity port over the existing Python `/api/*` backend (reuse dashboard_auth, Nous UI)
+
+**FG-17a — frontend parity migration (this milestone):**
+- [x] Next.js (App Router) frontend parity port over the existing Python `/api/*` backend (reuse dashboard_auth, Nous UI) — `web/` migrated Vite → Next.js static export into `hermes_cli/web_dist/`; `hermes_cli/web_server.py` + every `/api/*` contract left unchanged
+- [x] `data-component="ComponentName"` standard applied to every React component root via a build-time Babel plugin (`web/tools/babel-plugin-data-component.cjs`) — verified live in the rendered DOM
+- [x] Parity re-verified: FG-07 Tools page and FG-10 Comms page render feature-for-feature identically; all routes, dynamic plugin nav, theme/language, auth/session bootstrap, and forwarded-prefix root-path serving preserved
+- [x] tests green: web lint (0 errors) + typecheck + vitest unit; backend `tests/plan_baseline/` + `tests/hermes_cli/test_web_server.py` + `test_web_ui_build.py`; `ruff`/`ty` show no new diagnostics vs `develop`
+- [ ] **Follow-up (17a):** reverse-proxy *path-prefix* serving of Next's `/_next/*` assets — `web_server.py`'s `_serve_index()` prefix-rewrite only covers the Vite-era `/assets|/fonts|/ds-assets|/favicon` paths, so a `/hermes`-prefixed deploy needs `/_next/` added to that rewrite (a backend/shared-contract change, out of this parity PR's frontend-only scope). Root-path serving is unaffected.
+
+**FG-17b — new panels (later wave, NOT in this PR):**
 - [ ] Core-area view (FG-14 manifest/health + FG-12 change log + FG-16 trace)
 - [ ] Embedded Telegram chat → same FG-03 one-brain backend
 - [ ] Agent webview (CDP) — consent-gated (C6) + traced (C8) + per-user profile isolation
 - [ ] Tool link/icon registration (FG-07 registry; Next.js+Node tools) + dev→prod promote
-- [ ] tests (parity + web lint/typecheck + unit + negative + E2E) green
-- [ ] System test on the system-test ECS passed (see *System testing* section)
+- [ ] tests (17b unit + negative + E2E) green
+- [ ] System test on the system-test ECS passed (see *System testing* section) — **Leo-owned gated step; not run by the migration session**
 
 ## Audit log
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-12 | 1 | devin:8cec0d47 (for Leo) | Created FG doc | Phase-2 req 17.0: dashboard = the face; standardize on Next.js (frontend-only migration), embedded Telegram, agent webview, tool registration |
+| 2026-07-12 | 2 | devin:b33d3665 (for Leo) | FG-17a parity migration: `web/` ported Vite → Next.js (App Router, static export) over the unchanged Python `/api/*` backend; Nous UI/theming, dashboard_auth, plugin loading and all routes reused as-is; `data-component` standard automated via build-time Babel plugin; parity re-verified (FG-07 Tools + FG-10 Comms) with before/after screenshots. Backend (`web_server.py`, `/api/*`) untouched. FG-17b panels + ECS system test + prod promotion deliberately NOT done (later wave / Leo-owned gates). | Wave-B migration milestone: land the frontend parity face first with no backend/API regression |
 
 ## Cloud-agent prompt
 > **[Phase-2 Wave B (migration) → Wave C (new panels) — start migration after Phase-1 develop merged; new panels after FG-14/16/18 land]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-17`). **Migrate the dashboard frontend `web/` from Vite to Next.js (App Router), KEEPING the existing Python backend (`hermes_cli/web_server.py` + `/api/*`) as the API layer** — reuse every existing API contract, `dashboard_auth`, and the Nous-UI components; achieve feature parity FIRST (re-run FG-07 + FG-10 acceptance, no regression). Then add: a permanent **Core-area view** (FG-14 manifest/health + FG-12 change log + FG-16 trace); an **embedded Telegram chat** that routes to the SAME FG-03 one-brain backend as the Telegram app; an **agent webview** backed by the existing CDP browser toolset so the agent can drive webpages **on behalf of the user**, with **every action consent/approval-gated (C6) + traced (C8)** and per-user browser-profile isolation (default-deny, opt-in); and **tool link/icon registration** for FG-07 Next.js+Node tools (enable/disable/configure/promote). The dashboard + backend are **Core (C7)** — not agent-editable. Follow `AGENTS.md` and the `data-component` standard. Add parity + web lint/typecheck + unit + negative-access + E2E tests; keep baseline green; run `scripts/run_tests.sh`, `ruff`, `ty`, and the web checks. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist passes** — coordinate with Leo.
