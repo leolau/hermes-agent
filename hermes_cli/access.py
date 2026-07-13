@@ -19,6 +19,16 @@ feature groups (memory, skills, goals, tasks, tools, assets):
   enforced at the database and cannot be bypassed from the app layer. The owner
   role bypasses the filter and sees everything.
 
+  **Per-item grants (FG-19).** On top of shared/private, a row may be
+  *granted* to specific users through the :data:`ITEM_GRANTS_TABLE` — a
+  cross-user assignment that does **not** downgrade the row's visibility (the
+  owner's *other* private rows stay hidden). :func:`scope_filter` and
+  :func:`apply_scope_rls` take an optional ``grant_item_kind`` so a
+  grant-scoped table (a GTS goal/task) additionally reads a row when an active
+  (``pending``/``accepted``) grant to the requesting principal exists for that
+  exact item. This is a narrow extension of the existing C2 helpers, not a
+  second access system.
+
 Datastore routing always goes through contract C3
 (:func:`hermes_cli.datastore.get_store`) — this module never opens a raw
 connection or re-implements mode routing.
@@ -133,31 +143,112 @@ def normalize_visibility(visibility: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# C2 — per-item grants (FG-19): cross-user assignment as a per-row grant
+# ---------------------------------------------------------------------------
+
+#: The per-item grant table (FG-19). A grant is a cross-user share of one
+#: specific GTS item — an ``assignee`` (single, may act) or a read-only
+#: ``watcher`` — layered on top of the shared/private ``visibility`` tag. It
+#: never rewrites ``visibility``, so the owner's *other* private rows stay
+#: hidden from the grantee.
+ITEM_GRANTS_TABLE = "item_grants"
+
+#: Kinds of GTS node a grant may target (matches the C9 graph).
+GRANT_ITEM_KINDS: tuple[str, ...] = ("goal", "task")
+#: Grant roles: a single ``assignee`` (may advance progress) + read-only
+#: ``watcher``s.
+GRANT_TYPES: tuple[str, ...] = ("assignee", "watcher")
+#: Grant lifecycle states. Only :data:`GRANT_ACTIVE_STATUSES` confer access.
+GRANT_STATUSES: tuple[str, ...] = ("pending", "accepted", "declined", "revoked")
+#: The statuses that actually confer read/act access (a declined/revoked grant
+#: confers nothing).
+GRANT_ACTIVE_STATUSES: tuple[str, ...] = ("pending", "accepted")
+
+ITEM_GRANTS_SCHEMA_SQL = f"""
+CREATE TABLE IF NOT EXISTS {ITEM_GRANTS_TABLE} (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    item_kind TEXT NOT NULL CHECK (item_kind IN ('goal', 'task')),
+    item_id UUID NOT NULL,
+    user_id TEXT NOT NULL,
+    grant_type TEXT NOT NULL CHECK (grant_type IN ('assignee', 'watcher')),
+    granted_by TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'accepted'
+        CHECK (status IN ('pending', 'accepted', 'declined', 'revoked')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (item_kind, item_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS {ITEM_GRANTS_TABLE}_grantee_idx
+    ON {ITEM_GRANTS_TABLE} (user_id, status);
+CREATE INDEX IF NOT EXISTS {ITEM_GRANTS_TABLE}_item_idx
+    ON {ITEM_GRANTS_TABLE} (item_kind, item_id);
+-- The single-assignee invariant (D15): at most one *active* assignee per item.
+CREATE UNIQUE INDEX IF NOT EXISTS {ITEM_GRANTS_TABLE}_single_assignee
+    ON {ITEM_GRANTS_TABLE} (item_kind, item_id)
+    WHERE grant_type = 'assignee' AND status IN ('pending', 'accepted');
+"""
+
+
+def _grant_exists_sql(item_kind: str, id_expr: str, user_expr: str) -> str:
+    """SQL ``EXISTS`` clause: an active grant of ``item_kind`` to ``user_expr``.
+
+    ``item_kind`` is validated against :data:`GRANT_ITEM_KINDS` and inlined
+    (it is a fixed enum, never user input); ``id_expr`` / ``user_expr`` are
+    caller-controlled SQL fragments (a validated column reference and either a
+    ``$n`` placeholder or a ``current_setting(...)`` call).
+    """
+    if item_kind not in GRANT_ITEM_KINDS:
+        raise ValueError(f"Unknown grant item_kind: {item_kind!r}")
+    statuses = ", ".join(f"'{status}'" for status in GRANT_ACTIVE_STATUSES)
+    return (
+        f"EXISTS (SELECT 1 FROM {ITEM_GRANTS_TABLE} ig "
+        f"WHERE ig.item_kind = '{item_kind}' AND ig.item_id = {id_expr} "
+        f"AND ig.user_id = {user_expr} AND ig.status IN ({statuses}))"
+    )
+
+
+# ---------------------------------------------------------------------------
 # C2 — visibility / scoping helpers (app-layer filter)
 # ---------------------------------------------------------------------------
 
 
-def can_read(principal: Principal, visibility: str) -> bool:
+def can_read(
+    principal: Principal,
+    visibility: str,
+    *,
+    granted: bool = False,
+) -> bool:
     """Whether ``principal`` may read a row with the given ``visibility``.
 
     The owner role bypasses the filter (sees everything). ``shared`` rows are
     readable by every member; a ``private:<u>`` row is readable only by ``u``.
+    ``granted`` (FG-19) is set by the caller when an active per-item grant to
+    ``principal`` exists for the row — a grant confers read access to *that*
+    item without touching its ``visibility`` tag.
     """
     if principal.is_owner:
         return True
     if visibility == SHARED:
         return True
+    if granted:
+        return True
     owner = parse_private_owner(visibility)
     return owner is not None and owner == principal.user_id
 
 
-def can_read_row(principal: Principal, row: Mapping[str, object]) -> bool:
+def can_read_row(
+    principal: Principal,
+    row: Mapping[str, object],
+    *,
+    granted: bool = False,
+) -> bool:
     """Convenience wrapper of :func:`can_read` for a row mapping.
 
     Reads the ``visibility`` key; a missing/empty value is treated as an
-    unreadable private-to-nobody row (fail closed) unless the caller is owner.
+    unreadable private-to-nobody row (fail closed) unless the caller is owner
+    or holds an active per-item grant (``granted``, FG-19).
     """
-    if principal.is_owner:
+    if principal.is_owner or granted:
         return True
     visibility = row.get("visibility")
     if not isinstance(visibility, str) or not visibility:
@@ -183,20 +274,40 @@ def scope_filter(
     *,
     column: str = "visibility",
     start_index: int = 1,
+    grant_item_kind: str | None = None,
+    id_column: str = "id",
 ) -> ScopePredicate:
     """Return the read-visibility predicate for ``principal`` (contract C2).
 
     The owner role bypasses scoping (``TRUE`` with no params). A non-owner sees
     ``shared`` rows plus its own ``private:<user_id>`` rows. The predicate is
     parameterized to keep it injection-safe when composed into an asyncpg query.
+
+    When ``grant_item_kind`` (FG-19) is given, the predicate also matches a row
+    whose ``id_column`` has an active per-item grant to ``principal`` — the
+    "assigned/granted to me" clause. This never widens access to the owner's
+    *other* private rows: the grant is correlated to the row's own id. The
+    grant clause binds one extra positional param (the principal's user id) at
+    ``start_index + 1``, so a caller composing further placeholders must offset
+    by 2 rather than 1.
     """
     if not _VALID_COLUMN.fullmatch(column):
         raise ValueError(f"Invalid column name for scope_filter: {column!r}")
     if principal.is_owner:
         return ScopePredicate("TRUE", ())
     placeholder = f"${start_index}"
-    sql = f"({column} = 'shared' OR {column} = {placeholder})"
-    return ScopePredicate(sql, (principal.private_visibility,))
+    clauses = [f"{column} = 'shared'", f"{column} = {placeholder}"]
+    params: tuple[str, ...] = (principal.private_visibility,)
+    if grant_item_kind is not None:
+        if not _VALID_COLUMN.fullmatch(id_column):
+            raise ValueError(f"Invalid id_column for scope_filter: {id_column!r}")
+        grant_placeholder = f"${start_index + 1}"
+        clauses.append(
+            _grant_exists_sql(grant_item_kind, id_column, grant_placeholder)
+        )
+        params = (principal.private_visibility, principal.user_id)
+    sql = "(" + " OR ".join(clauses) + ")"
+    return ScopePredicate(sql, params)
 
 
 _VALID_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
@@ -250,6 +361,9 @@ async def initialize_access(connection: asyncpg.Connection) -> None:
 async def apply_scope_rls(
     connection: asyncpg.Connection,
     table: str,
+    *,
+    grant_item_kind: str | None = None,
+    id_column: str = "id",
 ) -> None:
     """Enforce contract-C2 visibility on ``table`` via Postgres RLS.
 
@@ -259,9 +373,25 @@ async def apply_scope_rls(
     role, the row is ``shared``, or the row is that principal's own
     ``private:<user_id>``. This is the database-level mirror of
     :func:`scope_filter`; the app-layer filter is defense in depth on top.
+
+    When ``grant_item_kind`` (FG-19) is given, the policy gains the
+    database-level "granted to me" clause: a row of ``table`` is also visible
+    when an active per-item grant to the bound principal exists for that exact
+    ``id_column`` — the Postgres mirror of :func:`scope_filter`'s grant clause.
+    Re-invoking this (the grant-aware call replaces the plain policy) is safe
+    because the policy is dropped and recreated.
     """
     if not _VALID_COLUMN.fullmatch(table):
         raise ValueError(f"Invalid table name: {table!r}")
+    grant_clause = ""
+    if grant_item_kind is not None:
+        if not _VALID_COLUMN.fullmatch(id_column):
+            raise ValueError(f"Invalid id_column: {id_column!r}")
+        grant_clause = "\n                OR " + _grant_exists_sql(
+            grant_item_kind,
+            f"{table}.{id_column}",
+            f"current_setting('{_GUC_ID}', true)",
+        )
     await connection.execute(
         f"""
         ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
@@ -272,7 +402,33 @@ async def apply_scope_rls(
             USING (
                 current_setting('{_GUC_ROLE}', true) = 'owner'
                 OR visibility = 'shared'
-                OR visibility = 'private:' || current_setting('{_GUC_ID}', true)
+                OR visibility = 'private:' || current_setting('{_GUC_ID}', true){grant_clause}
+            );
+        """
+    )
+
+
+async def apply_item_grants_rls(connection: asyncpg.Connection) -> None:
+    """Enforce read RLS on the FG-19 :data:`ITEM_GRANTS_TABLE`.
+
+    A ``FORCE``d read policy so a session sees a grant row only when it is the
+    owner role, the grantee (``user_id``), or the granter (``granted_by``).
+    This keeps the grant ledger itself scoped, and — because the goal/task
+    read policies reference this table in a correlated sub-select — it lets a
+    grantee's own grant satisfy those policies without exposing anyone else's
+    grants.
+    """
+    await connection.execute(
+        f"""
+        ALTER TABLE {ITEM_GRANTS_TABLE} ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE {ITEM_GRANTS_TABLE} FORCE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS hermes_grant_read ON {ITEM_GRANTS_TABLE};
+        CREATE POLICY hermes_grant_read ON {ITEM_GRANTS_TABLE}
+            FOR SELECT
+            USING (
+                current_setting('{_GUC_ROLE}', true) = 'owner'
+                OR user_id = current_setting('{_GUC_ID}', true)
+                OR granted_by = current_setting('{_GUC_ID}', true)
             );
         """
     )

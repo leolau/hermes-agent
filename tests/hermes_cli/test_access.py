@@ -5,6 +5,11 @@ from __future__ import annotations
 import pytest
 
 from hermes_cli.access import (
+    GRANT_ACTIVE_STATUSES,
+    GRANT_ITEM_KINDS,
+    GRANT_STATUSES,
+    GRANT_TYPES,
+    ITEM_GRANTS_TABLE,
     Principal,
     ROLES,
     SHARED,
@@ -112,3 +117,72 @@ def test_scope_filter_honors_column_and_start_index() -> None:
 def test_scope_filter_rejects_unsafe_column() -> None:
     with pytest.raises(ValueError):
         scope_filter(_p("alice", "member"), column="visibility; DROP TABLE x")
+
+
+# --- FG-19: per-item grant vocabulary + grant-aware C2 helpers -------------
+
+
+def test_grant_vocabulary_is_the_locked_set() -> None:
+    assert GRANT_ITEM_KINDS == ("goal", "task")
+    assert GRANT_TYPES == ("assignee", "watcher")
+    assert GRANT_STATUSES == ("pending", "accepted", "declined", "revoked")
+    # Only pending/accepted grants confer visibility.
+    assert GRANT_ACTIVE_STATUSES == ("pending", "accepted")
+
+
+def test_can_read_grant_admits_only_the_granted_item() -> None:
+    """A grant reads *that* row without downgrading its private visibility."""
+    bob = _p("bob", "member")
+    owners_private = private("alice")
+    # No grant → Bob cannot read Alice's private row.
+    assert can_read(bob, owners_private) is False
+    # An active grant for THIS item → readable, even though it stays private:alice.
+    assert can_read(bob, owners_private, granted=True) is True
+    # can_read_row honours the same flag (and still fails closed otherwise).
+    assert can_read_row(bob, {"visibility": owners_private}) is False
+    assert can_read_row(bob, {"visibility": owners_private}, granted=True) is True
+
+
+def test_scope_filter_grant_clause_binds_principal_and_correlates_item() -> None:
+    pred = scope_filter(_p("bob", "member"), grant_item_kind="task")
+    # shared OR own-private OR an active grant on THIS row's id to the principal.
+    assert "visibility = 'shared'" in pred.sql
+    assert "visibility = $1" in pred.sql
+    assert f"FROM {ITEM_GRANTS_TABLE} ig" in pred.sql
+    assert "ig.item_kind = 'task'" in pred.sql
+    assert "ig.item_id = id" in pred.sql
+    assert "ig.user_id = $2" in pred.sql
+    assert "ig.status IN ('pending', 'accepted')" in pred.sql
+    # Two bound params: the private tag ($1) and the principal id ($2).
+    assert pred.params == ("private:bob", "bob")
+
+
+def test_scope_filter_grant_clause_honours_indices_and_id_column() -> None:
+    pred = scope_filter(
+        _p("bob", "member"),
+        column="g.visibility",
+        start_index=2,
+        grant_item_kind="goal",
+        id_column="g.id",
+    )
+    assert "g.visibility = $2" in pred.sql
+    assert "ig.item_id = g.id" in pred.sql
+    assert "ig.user_id = $3" in pred.sql
+    assert pred.params == ("private:bob", "bob")
+
+
+def test_scope_filter_owner_bypass_ignores_grant_kind() -> None:
+    pred = scope_filter(_p("root", "owner"), grant_item_kind="task")
+    assert pred.sql == "TRUE"
+    assert pred.params == ()
+
+
+def test_scope_filter_rejects_unknown_grant_kind_and_unsafe_id_column() -> None:
+    with pytest.raises(ValueError):
+        scope_filter(_p("bob", "member"), grant_item_kind="skill")
+    with pytest.raises(ValueError):
+        scope_filter(
+            _p("bob", "member"),
+            grant_item_kind="task",
+            id_column="id; DROP TABLE x",
+        )
