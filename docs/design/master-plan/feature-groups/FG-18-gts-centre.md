@@ -51,8 +51,35 @@ score is **never hand-set**.
    goal/task has a user-defined **evaluation method** (`GoalMetric`-style:
    target/current/unit/source_query, or a weighted rubric). Score is **always
    computed**, clamped `0 ≤ score ≤ 100`, never hand-set. **Rollup:** a parent's
-   score = priority-weighted aggregate of its children's scores (composable up
-   the hierarchy).
+   score = priority-weighted aggregate of its **measurable** children's scores
+   (composable up the hierarchy).
+3a. **Observe vs measure (refines C9).** **Every goal is *observable*; not every
+    goal is *measurable*.** The user-owned evaluation method carries an explicit
+    `measurable` flag plus a typed **observation**:
+    - `observation: { source: internal | external | ask, prompt, ref? }` —
+      `internal` = Hermes/GTS state; `external` = a database / API / **MCP** tool
+      (the handle lives in `ref`, required for `external`); `ask` = feedback
+      solicited from the user. `prompt` is the user's own description of **how to
+      observe** the status.
+    - **Measurable** goals additionally carry a **scoring prompt**
+      (`scoring: { prompt }`) — the rule that **programmatically** computes/updates
+      the 0–100 score from the latest observed state. Execution is a **clean seam**
+      (`GtsScoreEvaluator` / `ScoringRequest`): the prompt + source are stored and
+      validated here, and a deterministic default evaluator reads the recorded
+      observation; a real executor (LLM / db / api / mcp) plugs in without touching
+      Core. Whatever it returns is **clamped**; the score is never hand-set.
+    - **Non-measurable** goals keep an observation prompt + an **observed status**
+      (qualitative / user-confirmed) but get **no auto-score** and are **excluded
+      from parent rollups**.
+    - The observed state is **data** (recorded via `record_observation` by the user
+      *or* the agent, like metrics/progress) stored on the additive
+      `goals.observed_state` / `tasks.observed_state` column — **never** in the
+      locked method. The **observation prompt, `measurable` flag, and scoring
+      prompt are the user-owned evaluation method** (Core-protected, C7/C9): the
+      runtime agent is **refused + audited (C5/C8)** if it tries to set/change
+      them. Backward-compatible: a legacy method (metric `weights` / task
+      `state_scores`, no `measurable` key) stays measurable via the existing
+      computed path.
 4. **Hierarchy + priority integrity.** Cycle prevention on `parent_*_id`;
    priority ordering per level; states for incomplete/blocked/cancelled/archived
    preserved from FG-04/06.
@@ -63,11 +90,12 @@ score is **never hand-set**.
    tree with priorities + scores, skill associations, progress views.
 
 ## Data model (Supabase `app_*`, extending FG-04/06)
-- `goals` (FG-04) `+ parent_goal_id`, `level`, `score`, `evaluation_method_ref`.
-- `tasks` (FG-06) `+ parent_task_id`, `priority`, `score`, `evaluation_method_ref`.
+- `goals` (FG-04) `+ parent_goal_id`, `level`, `score`, `observed_state`, `evaluation_method_ref`.
+- `tasks` (FG-06) `+ parent_task_id`, `priority`, `score`, `observed_state`, `evaluation_method_ref`.
 - `skills_registry(id, owner_user_id, visibility, name, skill_ref, ...)`.
 - `task_goals(task_id, goal_id)`, `task_skills(task_id, skill_id)` — M:N joins.
-- `evaluation_methods(id, target_kind ∈ {goal,task}, target_id, method_json, set_by_user_id, locked:true)` — user-owned, agent-immutable.
+- `evaluation_methods(id, target_kind ∈ {goal,task}, target_id, method_json, set_by_user_id, locked:true)` — user-owned, agent-immutable. `method_json` carries `measurable` + typed `observation {source,prompt,ref?}` + (measurable-only) `scoring {prompt}`, additive to the legacy `weights`/`state_scores`.
+- `goals.observed_state` / `tasks.observed_state` (additive JSONB) — the latest **observed** status/state (data, agent-recordable), read by the scoring seam; distinct from the locked method.
 - Reuse `goal_progress`/`task_progress_states`/`task_transitions` for history; C5 for change audit; C8 for traces.
 
 ## Dev/Prod + Supabase
@@ -76,8 +104,8 @@ GTS data in `app_*` via C3; the Ralph execution loop stays in SQLite core
 
 ## Testing requirements
 - Baseline: `test_goal_state_baseline.py` + `test_todo_store_baseline.py` stay green (no break to FG-04/06 serialization).
-- Unit: M:N link CRUD (task↔goals, skill↔tasks); hierarchy + **cycle prevention**; priority ordering; **score always computed + clamped 0–100**; **rollup** (priority-weighted child→parent).
-- Authority: agent **cannot** create/modify a **top-level goal** (refused + audited); agent **can** create sub-goal/task under an authorized parent; agent **cannot** change an evaluation method (refused + audited); user can.
+- Unit: M:N link CRUD (task↔goals, skill↔tasks); hierarchy + **cycle prevention**; priority ordering; **score always computed + clamped 0–100**; **rollup** (priority-weighted child→parent); **observe/measure** — observation-source typing (`internal|external|ask`, `ref` required for `external`), measurable vs non-measurable, scoring-prompt → clamped score via the evaluator seam, **rollup only over measurable children**.
+- Authority: agent **cannot** create/modify a **top-level goal** (refused + audited); agent **can** create sub-goal/task under an authorized parent; agent **cannot** set/change an evaluation method — including the **observation prompt, `measurable` flag, and scoring prompt** (refused + audited); user can. Recording the **observed state** is data (agent-allowed).
 - Negative access: user A can't see user B's private goal/task/skill; owner can.
 - E2E: user creates top-level goal + evaluation method → agent adds sub-goals/tasks/sub-tasks + links skills → progress recorded → **score auto-computed and rolls up** → judge/verdict sees the metric.
 - Cache-safety: GTS updates never mutate the system prompt (prompt bytes unchanged).
@@ -111,6 +139,7 @@ Tests green (incl. authority + cycle + score/rollup + cache-safety + negative ac
 |------|---------|--------|--------|-----------|
 | 2026-07-12 | 1 | devin:8cec0d47 (for Leo) | Created FG doc | Phase-2 req 18.0: GTS Centre as a Core tool unifying goals/tasks/skills (M:N, hierarchy, priorities, user-only top goals + eval methods, auto-score) |
 | 2026-07-12 | 2 | devin:b9d4f38f (for Leo) | Implemented C9 GTS Centre (`hermes_cli/gts.py`) extending FG-04/06 + skills; added authority model, cycle-safe hierarchy, M:N edges, `skills_registry`/`evaluation_methods`, computed+clamped scores with priority-weighted rollup, cache-safe surfacing; marked the engine Core in `core_manifest.yaml` + `agent/core_boundary.py`; added unit + real-Postgres E2E tests | Deliver the GTS Centre per this spec's Design/Testing/DoD. ECS system-test box + prod promotion remain separate gated steps owned by Leo (not run here). |
+| 2026-07-13 | 3 | devin (for Leo) | **Refined C9 with the observe/measure model.** Extended the existing `evaluation_methods` `method_json` (additive, no new store): explicit `measurable` flag + typed `observation {source: internal\|external\|ask, prompt, ref?}` + (measurable-only) `scoring {prompt}`, with validation (bad source / empty prompt / missing `external` ref / measurable-without-scoring / non-measurable-with-scoring all rejected). Added a `GtsScoreEvaluator`/`ScoringRequest` scoring seam (deterministic default; no external calls) + additive `goals.observed_state`/`tasks.observed_state` columns and `record_observation`/`get_observation` (observed status is data — agent-recordable — never the locked method). Measurable leaves score through the seam (clamped); non-measurable goals carry qualitative status with no auto-score and are **excluded from parent rollups**. Authority unchanged: the observation prompt, `measurable` flag, and scoring prompt are user-owned (agent refused + audited via C8 `core_denied` + durable JSONL). Added unit + real-Postgres E2E coverage; baseline/`ruff`/`ty` green. | Every goal is observable but not always measurable; give measurable goals a user-authored, programmatic scoring path over an observed state while keeping non-measurable goals qualitative — all within the existing GTS structures, cache-safe, and behind the C7/C9 authority boundary. ECS system-test box + prod promotion remain separate gated steps owned by Leo (not run here). |
 
 ## Cloud-agent prompt
 > **[Phase-2 Wave B — start after FG-04/FG-06/FG-01/FG-12/FG-13 (Phase-1) merged + FG-14 C7]** Repo `leolau/hermes-agent`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-18`). Build the **GTS Centre** by **extending** FG-04 (`hermes_cli/goal_registry.py`, `goals.py`) + FG-06 (`tasks`/kanban/todo) + existing skills — **do NOT create a new goal/task store**. Publish contract **C9**: a unified graph with **hierarchical** goals + tasks (`parent_*_id`, cycle-safe), **priorities**, **M:N** `task_goals` and `task_skills`, and a `skills_registry` referencing existing skill content. Enforce the **authority model**: **only the user** creates/manages **top-level goals** and **evaluation methods** (agent refused + audited via C5/C8); the **agent may** create sub-goals/tasks/sub-tasks under an authorized parent (side-effecting ones ride C6). Each goal/task has a **user-defined evaluation method** and an **auto-computed score clamped 0–100** (never hand-set), with a **priority-weighted rollup** from children to parent — reuse FG-04's `GoalMetric`/`verdict_for_metrics`. The GTS engine + evaluation-method fields are **Core (C7)**. Surface GTS state to the agent **only via tool results / appended messages — never mutate the system prompt** (cache sacred). Route via C3; scope via C2 (owner sees all). Follow `AGENTS.md` (extend-don't-duplicate, footprint ladder). Keep `tests/plan_baseline/` green; add unit + authority + cycle + score/rollup + negative-access + cache-safety + real-Postgres E2E tests (temp `HERMES_HOME` + throwaway Postgres); run `scripts/run_tests.sh`, `ruff`, `ty`. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist passes** — coordinate with Leo.
