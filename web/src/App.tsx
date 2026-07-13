@@ -48,6 +48,7 @@ import {
   ShieldCheck,
   Sparkles,
   Star,
+  Target,
   Terminal,
   Users,
   Webhook,
@@ -93,6 +94,9 @@ import ChannelsPage from "@/screens/ChannelsPage";
 import WebhooksPage from "@/screens/WebhooksPage";
 import SystemPage from "@/screens/SystemPage";
 import CommsPage from "@/screens/CommsPage";
+import CorePage from "@/screens/CorePage";
+import GtsCentrePage from "@/screens/GtsCentrePage";
+import OnboardingPage from "@/screens/OnboardingPage";
 import ChatPage from "@/screens/ChatPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
@@ -147,6 +151,9 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/tools": ToolsPage,
   "/pairing": PairingPage,
   "/comms": CommsPage,
+  "/core": CorePage,
+  "/gts": GtsCentrePage,
+  "/onboarding": OnboardingPage,
   "/channels": ChannelsPage,
   "/webhooks": WebhooksPage,
   "/system": SystemPage,
@@ -195,6 +202,9 @@ const BUILTIN_NAV_REST: NavItem[] = [
   { path: "/webhooks", label: "Webhooks", icon: Webhook },
   { path: "/pairing", label: "Pairing", icon: ShieldCheck },
   { path: "/comms", label: "Comms", icon: Bell },
+  { path: "/onboarding", label: "Getting started", icon: Sparkles },
+  { path: "/core", label: "Core area", icon: Shield },
+  { path: "/gts", label: "GTS Centre", icon: Target },
   { path: "/profiles", labelKey: "profiles", label: "Profiles", icon: Users },
   { path: "/config", labelKey: "config", label: "Config", icon: Settings },
   { path: "/env", labelKey: "keys", label: "Keys", icon: KeyRound },

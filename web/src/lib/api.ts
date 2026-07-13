@@ -1313,6 +1313,38 @@ export const api = {
       { method: "POST" },
     ),
   getCommsMemory: () => fetchJSON<CommsMemoryResponse>("/api/comms/memory"),
+
+  // FG-16 interaction trace (C8) — read-only list + detail, C2-scoped. Reused
+  // by the FG-17b Core-area view. ``as`` narrows the owner-operator's C2 view
+  // to a specific principal (an inspection aid, never an escalation).
+  getCommsTraces: (opts?: { as?: string; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.as) params.set("as", opts.as);
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    return fetchJSON<CommsTracesResponse>(
+      `/api/comms/traces${qs ? `?${qs}` : ""}`,
+    );
+  },
+  getCommsTrace: (traceId: string, opts?: { as?: string }) => {
+    const qs = opts?.as ? `?as=${encodeURIComponent(opts.as)}` : "";
+    return fetchJSON<CommsTraceDetailResponse>(
+      `/api/comms/traces/${encodeURIComponent(traceId)}${qs}`,
+    );
+  },
+
+  // FG-14 Core-area boundary projection (C7) — read-only.
+  getCoreManifest: () => fetchJSON<CoreManifestResponse>("/api/core/manifest"),
+
+  // FG-18 GTS Centre graph (C9) — read-only, C2-scoped.
+  getGtsGraph: (opts?: { as?: string }) => {
+    const qs = opts?.as ? `?as=${encodeURIComponent(opts.as)}` : "";
+    return fetchJSON<GtsGraphResponse>(`/api/gts/graph${qs}`);
+  },
+
+  // FG-15 onboarding readiness (first-run wizard).
+  getOnboardingReadiness: () =>
+    fetchJSON<OnboardingReadinessResponse>("/api/onboarding/readiness"),
 };
 
 export type CommsNotificationKind = "approval" | "proactive_ask";
@@ -1464,6 +1496,158 @@ export interface CommsMemoryResponse {
   configured: boolean;
   principal?: string | null;
   memories: CommsMemory[];
+}
+
+// ── FG-16 interaction trace (C8) ─────────────────────────────────────
+export interface CommsTraceSummary {
+  trace_id: string;
+  first_ts: string;
+  last_ts: string;
+  actor_user_id: string | null;
+  session_key: string | null;
+  platform: string | null;
+  mode: string;
+  event_count: number;
+  kind_counts: Record<string, number>;
+  rolled_up: boolean;
+}
+
+export interface CommsTracesResponse {
+  configured: boolean;
+  principal?: string | null;
+  traces: CommsTraceSummary[];
+}
+
+export interface CommsInteraction {
+  id: string;
+  trace_id: string;
+  parent_id: string | null;
+  ts: string;
+  actor_user_id: string | null;
+  session_key: string | null;
+  platform: string | null;
+  kind: string;
+  ref: string | null;
+  summary: string | null;
+  payload_ref: string | null;
+  mode: string;
+}
+
+export interface CommsTraceDetailResponse {
+  configured: boolean;
+  principal?: string | null;
+  trace_id: string;
+  interactions: CommsInteraction[];
+  rollup: CommsTraceSummary | null;
+}
+
+// ── FG-14 Core-area boundary projection (C7) ─────────────────────────
+export interface CoreDenial {
+  id: string;
+  ts: number;
+  actor_user_id: string;
+  mode: string;
+  summary: string;
+  op?: { kind?: string; op?: string; path?: string; matched_glob?: string };
+}
+
+export interface CoreManifestResponse {
+  core_root: string;
+  manifest_path: string;
+  manifest_present: boolean;
+  manifest_parseable: boolean;
+  fallback_active: boolean;
+  self_protected: boolean;
+  globs: string[];
+  glob_count: number;
+  audit_log_path: string;
+  denials: CoreDenial[];
+}
+
+// ── FG-18 GTS Centre graph (C9) ──────────────────────────────────────
+export interface GtsObservation {
+  source: string;
+  prompt: string;
+  ref?: Record<string, unknown>;
+}
+
+export interface GtsEvaluationMethod {
+  set_by_user_id: string | null;
+  locked: boolean;
+  measurable: boolean;
+  observation: GtsObservation | null;
+  scoring_prompt: string;
+}
+
+export interface GtsGoal {
+  id: string;
+  owner_user_id: string;
+  visibility: string;
+  title: string;
+  priority: string;
+  status: string;
+  level: string;
+  parent_goal_id: string | null;
+  score: number | null;
+  evaluation_method: GtsEvaluationMethod;
+}
+
+export interface GtsTask {
+  id: string;
+  owner_user_id: string;
+  visibility: string;
+  title: string;
+  priority: string;
+  status: string;
+  current_state: string;
+  parent_task_id: string | null;
+  score: number | null;
+  evaluation_method: GtsEvaluationMethod;
+}
+
+export interface GtsSkill {
+  id: string;
+  owner_user_id: string;
+  visibility: string;
+  name: string;
+  skill_ref: string;
+}
+
+export interface GtsGraphResponse {
+  configured: boolean;
+  principal?: string | null;
+  mode?: string;
+  goals: GtsGoal[];
+  tasks: GtsTask[];
+  skills: GtsSkill[];
+  task_goals: { task_id: string; goal_id: string }[];
+  task_skills: { task_id: string; skill_id: string }[];
+  assignment: { enabled: boolean; scheme: string };
+}
+
+// ── FG-15 onboarding readiness (first-run wizard) ────────────────────
+export interface OnboardingItem {
+  key: string;
+  label: string;
+  required: boolean;
+  rationale: string;
+  fix_command: string;
+  contract: string;
+  met: boolean;
+  detail: string;
+}
+
+export interface OnboardingReadinessResponse {
+  score: number;
+  score_pct: number;
+  ready_for_prod: boolean;
+  required_total: number;
+  required_met: number;
+  optional_total: number;
+  optional_met: number;
+  optional_coverage: number;
+  missing_required: string[];
+  items: OnboardingItem[];
 }
 
 /** Identity payload returned by ``GET /api/auth/me`` (Phase 7).
