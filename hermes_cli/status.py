@@ -89,6 +89,63 @@ def _effective_provider_label() -> str:
 from hermes_constants import is_termux as _is_termux
 
 
+def _show_readiness(config: dict, deep: bool) -> None:
+    """Print the FG-15 onboarding readiness score + per-required-item checks.
+
+    Shares the single readiness backend with ``hermes setup`` and the dashboard
+    API. The C1 owner probe hits Supabase, so it only runs under ``--deep``;
+    a plain ``hermes status`` shows the score with the owner check deferred.
+    """
+    from hermes_cli.onboarding_readiness import evaluate
+
+    try:
+        readiness = evaluate(config, include_owner=deep)
+    except Exception:
+        return
+
+    print()
+    pct = readiness.score_pct
+    bar_color = (
+        Colors.GREEN if readiness.ready_for_prod
+        else Colors.YELLOW if pct >= 60
+        else Colors.RED
+    )
+    header = (
+        f"◆ Onboarding Readiness  {color(f'{pct}%', bar_color, Colors.BOLD)}"
+        f"  ({readiness.required_met}/{readiness.required_total} required)"
+    )
+    print(color(header, Colors.CYAN, Colors.BOLD))
+
+    for result in readiness.results:
+        if not result.item.required:
+            continue
+        mark = check_mark(result.met)
+        label = result.item.label
+        detail = color(f"— {result.detail}", Colors.DIM)
+        print(f"  {mark} {label}  {detail}")
+        if not result.met:
+            print(color(f"      fix: {result.item.fix_command}", Colors.DIM))
+            print(color(f"      why: {result.item.rationale}", Colors.DIM))
+
+    if readiness.ready_for_prod:
+        print(color("  ● Ready for prod: yes", Colors.GREEN))
+    else:
+        print(color("  ● Ready for prod: no (required items missing)", Colors.YELLOW))
+
+    if not deep:
+        print(color(
+            "  * owner check deferred — run 'hermes status --deep' to verify the prod gate",
+            Colors.DIM,
+        ))
+
+    opt = readiness.optional_total
+    if opt:
+        print(color(
+            f"  optional: {readiness.optional_met}/{opt} configured",
+            Colors.DIM,
+        ))
+
+
 def show_status(args):
     """Show status of all Hermes Agent components."""
     deep = getattr(args, 'deep', False)
@@ -116,6 +173,11 @@ def show_status(args):
 
     print(f"  Model:        {_configured_model_label(config)}")
     print(f"  Provider:     {_effective_provider_label()}")
+
+    # =========================================================================
+    # Onboarding Readiness (FG-15)
+    # =========================================================================
+    _show_readiness(config, deep)
 
     # =========================================================================
     # API Keys

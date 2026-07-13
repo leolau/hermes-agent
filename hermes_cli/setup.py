@@ -662,6 +662,8 @@ def _print_setup_summary(config: dict, hermes_home):
     print(f"   {color(f'nano {get_env_path()}', Colors.DIM)}")
     print()
 
+    _print_readiness_summary(config)
+
     print(color("─" * 60, Colors.DIM))
     print()
     print(color("🚀 Ready to go!", Colors.CYAN, Colors.BOLD))
@@ -2617,7 +2619,188 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
 # Main Wizard Orchestrator
 # =============================================================================
 
+def _print_readiness_summary(config: dict) -> None:
+    """Print a compact FG-15 readiness line at the end of the wizard.
+
+    Uses the shared readiness backend. The C1 owner probe hits Supabase, so
+    this fast summary skips it (``include_owner=False``) and points at
+    ``hermes setup essentials`` / ``hermes status --deep`` for the full gate.
+    """
+    from hermes_cli.onboarding_readiness import evaluate
+
+    try:
+        readiness = evaluate(config, include_owner=False)
+    except Exception:
+        return
+
+    print(color("─" * 60, Colors.DIM))
+    print()
+    print(color("◆ Onboarding Readiness", Colors.CYAN, Colors.BOLD))
+    print(
+        f"   {readiness.score_pct}% "
+        f"({readiness.required_met}/{readiness.required_total} required items)"
+    )
+    missing = [r for r in readiness.missing_required() if r.item.key != "owner_identity"]
+    for result in missing:
+        print(color(f"   ✗ {result.item.label}: {result.item.fix_command}", Colors.DIM))
+    print(color(
+        "   Finish setup + verify the prod gate: hermes setup essentials",
+        Colors.DIM,
+    ))
+    print()
+
+
+def _essentials_fix_datastore(config: dict) -> None:
+    """Fix action for the C3 app datastore — store the DSN as a ``.env`` secret.
+
+    The DSN is a credential, so it goes to ``.env`` (as ``DATABASE_URL``) via the
+    existing secret flow; ``config.yaml`` only references it as ``${DATABASE_URL}``.
+    """
+    print_info("The application datastore holds identity, memory, goals and traces.")
+    print_info("Paste a Postgres/Supabase connection string (postgresql://...).")
+    print_info("Stored in your .env as DATABASE_URL — never written to config.yaml.")
+    try:
+        dsn = masked_secret_prompt("  DATABASE_URL: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        print_info("  Skipped.")
+        return
+    if not dsn:
+        print_info("  Skipped (no value entered).")
+        return
+    save_env_value("DATABASE_URL", dsn)
+    datastore = config.setdefault("datastore", {})
+    if not isinstance(datastore, dict):
+        datastore = {}
+        config["datastore"] = datastore
+    supabase_app = datastore.setdefault("supabase_app", {})
+    if not isinstance(supabase_app, dict):
+        supabase_app = {}
+        datastore["supabase_app"] = supabase_app
+    supabase_app["dsn"] = "${DATABASE_URL}"
+    save_config(config)
+    print_success("  ✓ Datastore DSN saved to .env (referenced as ${DATABASE_URL}).")
+
+
+def _essentials_fix_owner(config: dict) -> None:
+    """Fix action for the C1 owner — reuse ``hermes owner init`` enrollment."""
+    import argparse as _argparse
+
+    from hermes_cli.onboarding_readiness import app_datastore_configured
+
+    if not app_datastore_configured(config):
+        print_error("  Configure the application datastore first — the owner lives in it.")
+        return
+    print_info("Enroll exactly one owner: the principal that bypasses all scoping.")
+    user_id = prompt("  Owner system user id (GoTrue subject)")
+    if not user_id or not user_id.strip():
+        print_info("  Skipped (no user id entered).")
+        return
+    display = prompt("  Display name (optional)", default="") or ""
+    namespace = _argparse.Namespace(user_id=user_id.strip(), display=display.strip())
+    try:
+        from hermes_cli.owner import owner_init_command
+
+        owner_init_command(namespace)
+    except SystemExit:
+        # owner_init_command exits(1) on failure/already-set; it prints why.
+        pass
+
+
+def setup_essentials(config: dict) -> None:
+    """FG-15 — guided setup of the 5 REQUIRED onboarding items.
+
+    For each required item shows a check (✓/✗) + one-line rationale, runs its
+    fix action when unmet, then prints the readiness score and the "ready for
+    prod" gate. Idempotent and resumable: satisfied items are shown as done and
+    skipped, each completion is recorded via ``onboarding.seen``, and nothing
+    already configured is clobbered. Traced via C8 (best-effort).
+    """
+    import getpass
+
+    from agent.onboarding import mark_seen
+    from hermes_cli.onboarding_readiness import (
+        APP_DATASTORE_DSN,
+        HOME_BOOTSTRAP,
+        LLM_PROVIDER_SECRET,
+        OWNER_IDENTITY,
+        TELEGRAM_CHANNEL,
+        emit_readiness_trace,
+        evaluate,
+        seen_flag,
+    )
+
+    print_header("Onboarding Essentials")
+    print_info("These 5 items are required before Hermes is ready for production.")
+    print_info("Optional extras (more channels, memory, tools) can be added anytime.")
+
+    ensure_hermes_home()
+    config_path = get_config_path()
+    if not config_path.exists():
+        save_config(config)
+
+    fixers = {
+        APP_DATASTORE_DSN: _essentials_fix_datastore,
+        OWNER_IDENTITY: _essentials_fix_owner,
+        LLM_PROVIDER_SECRET: setup_model_provider,
+        TELEGRAM_CHANNEL: setup_gateway,
+    }
+
+    readiness = evaluate(config, include_owner=True)
+    for result in readiness.results:
+        if not result.item.required:
+            continue
+        item = result.item
+        print()
+        if result.met:
+            print_success(f"  ✓ {item.label} — {result.detail}")
+            mark_seen(config_path, seen_flag(item.key))
+            continue
+        print_error(f"  ✗ {item.label} — {result.detail}")
+        print_info(f"    why: {item.rationale}")
+        if item.key == HOME_BOOTSTRAP:
+            save_config(config)
+            print_success("  ✓ Home/config bootstrapped.")
+            mark_seen(config_path, seen_flag(item.key))
+            continue
+        fixer = fixers.get(item.key)
+        if fixer is None:
+            print_info(f"    Fix with: {item.fix_command}")
+            continue
+        if not prompt_yes_no(f"  Configure {item.label} now?", default=True):
+            print_info(f"    Skipped — fix later with: {item.fix_command}")
+            continue
+        try:
+            fixer(config)
+        except (KeyboardInterrupt, EOFError):
+            print()
+            print_info("    Skipped.")
+            continue
+        save_config(config)
+
+    final = evaluate(config, include_owner=True)
+    for result in final.results:
+        if result.item.required and result.met:
+            mark_seen(config_path, seen_flag(result.item.key))
+
+    print()
+    print_header("Readiness")
+    print_info(
+        f"  Score: {final.score_pct}% "
+        f"({final.required_met}/{final.required_total} required)"
+    )
+    if final.ready_for_prod:
+        print_success("  ● Ready for prod: yes")
+    else:
+        missing = ", ".join(r.item.label for r in final.missing_required())
+        print_warning(f"  ● Ready for prod: no — still missing: {missing}")
+
+    actor = getpass.getuser() or "cli-setup"
+    emit_readiness_trace(final, actor_user_id=actor, config=config)
+
+
 SETUP_SECTIONS = [
+    ("essentials", "Onboarding Essentials", setup_essentials),
     ("model", "Model & Provider", setup_model_provider),
     ("tts", "Text-to-Speech", setup_tts),
     ("terminal", "Terminal Backend", setup_terminal_backend),
