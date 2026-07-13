@@ -51,11 +51,13 @@ core_globs:
   # The GTS Centre is a Core tool (D14): its implementation + governing rules
   # are immutable to the runtime agent (only its *data* is mutable, within its
   # authority rules). These are the goal/task registry engine files the GTS
-  # Centre is built on. FG-18 appends its dedicated engine module here when it
-  # lands (human PR — the manifest is Core).
+  # Centre is built on, plus the C9 unified-graph engine itself (hierarchy,
+  # M:N edges, authority model, and the agent-immutable evaluation-method +
+  # score fields).
   - hermes_cli/goal_registry.py
   - hermes_cli/goals.py
   - hermes_cli/task_registry.py
+  - hermes_cli/gts.py
 
   # --- The boundary guard itself + this manifest (self-protecting) -------
   - agent/core_boundary.py
