@@ -99,6 +99,16 @@ GtsActor = Literal["user", "agent"]
 #: hang off a parent goal and may be managed by the agent.
 GOAL_LEVELS: Tuple[str, ...] = ("top", "sub")
 
+#: How a goal/task's status is *observed*. Every goal is **observable**; the
+#: source names where that observation comes from:
+#:   * ``internal`` — Hermes/GTS state itself (metrics, task progress, …).
+#:   * ``external`` — a database / API / MCP tool (carry the handle in ``ref``).
+#:   * ``ask``      — feedback solicited from the user.
+#: Observability is universal; *measurability* (an auto-computed 0–100 score) is
+#: the narrower property layered on top (see ``measurable`` on the method).
+ObservationSource = Literal["internal", "external", "ask"]
+OBSERVATION_SOURCES: Tuple[str, ...] = ("internal", "external", "ask")
+
 #: The M:N + registry + method tables this module owns (reuses ``goals`` /
 #: ``tasks`` from FG-04/06 rather than duplicating them).
 SKILLS_TABLE = "skills_registry"
@@ -131,6 +141,7 @@ ALTER TABLE {GOALS_TABLE}
         REFERENCES {GOALS_TABLE}(id) ON DELETE SET NULL,
     ADD COLUMN IF NOT EXISTS level TEXT NOT NULL DEFAULT 'top',
     ADD COLUMN IF NOT EXISTS score DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS observed_state JSONB,
     ADD COLUMN IF NOT EXISTS evaluation_method_ref UUID;
 CREATE INDEX IF NOT EXISTS {GOALS_TABLE}_parent_idx
     ON {GOALS_TABLE} (parent_goal_id);
@@ -140,6 +151,7 @@ ALTER TABLE {TASKS_TABLE}
         REFERENCES {TASKS_TABLE}(id) ON DELETE SET NULL,
     ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT '{DEFAULT_GOAL_PRIORITY}',
     ADD COLUMN IF NOT EXISTS score DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS observed_state JSONB,
     ADD COLUMN IF NOT EXISTS evaluation_method_ref UUID;
 CREATE INDEX IF NOT EXISTS {TASKS_TABLE}_parent_idx
     ON {TASKS_TABLE} (parent_task_id);
@@ -281,6 +293,180 @@ class EvaluationMethod:
     method: Mapping[str, object]
     set_by_user_id: str
     locked: bool
+
+
+@dataclass(frozen=True)
+class ObservationSpec:
+    """How a goal/task's status is observed — the user-authored *observe* half.
+
+    ``source`` is one of :data:`OBSERVATION_SOURCES`; ``prompt`` describes, in
+    the user's words, *how* to observe the status; ``ref`` carries an opaque
+    handle to the backing db/api/mcp tool for ``external`` sources (never
+    executed here — it is stored + validated only, a clean seam for a separate
+    execution engine). Every goal is observable, so every user-authored
+    evaluation method carries one of these.
+    """
+
+    source: str
+    prompt: str
+    ref: Optional[Mapping[str, object]] = None
+
+    def as_dict(self) -> Dict[str, object]:
+        payload: Dict[str, object] = {"source": self.source, "prompt": self.prompt}
+        if self.ref is not None:
+            payload["ref"] = dict(self.ref)
+        return payload
+
+
+@dataclass(frozen=True)
+class ScoringRequest:
+    """Input handed to the scoring seam for a **measurable** goal/task.
+
+    Bundles the user-authored observation + scoring prompt with the latest
+    ``observed_state`` recorded against the node. A :data:`GtsScoreEvaluator`
+    turns this into a raw score (the engine clamps it to ``0–100`` and never
+    lets it be hand-set). The evaluator is where a real system would *execute*
+    the scoring prompt against the observed state; that execution is out of
+    scope here — the default evaluator is deterministic (see
+    :func:`default_score_evaluator`).
+    """
+
+    target_kind: str
+    target_id: str
+    observation: ObservationSpec
+    scoring_prompt: str
+    observed_state: Mapping[str, object]
+    mode: str
+
+
+#: The scoring-prompt *execution* seam. Given a :class:`ScoringRequest`, return
+#: a raw score (the engine clamps to ``0–100``), or ``None`` when the node
+#: cannot be scored yet (e.g. no observation recorded). Kept as a clean seam so
+#: the real executor (LLM / db / api / mcp) can be wired in without touching the
+#: Core engine; this task ships only the deterministic default.
+GtsScoreEvaluator = Callable[["ScoringRequest"], Optional[float]]
+
+
+def default_score_evaluator(request: "ScoringRequest") -> Optional[float]:
+    """Minimal, deterministic scoring seam used when none is injected.
+
+    A real executor would *run* ``request.scoring_prompt`` against the observed
+    state (reading internal GTS state, querying the ``external`` ref, or using
+    the user's ``ask`` feedback). We do not execute anything here; instead we
+    read the programmatic result a user/agent already recorded via
+    :meth:`GtsCentre.record_observation` — the numeric ``score`` key of the
+    observed state. Returns ``None`` when absent so the engine leaves the score
+    unset until a real observation lands. The engine clamps whatever comes back.
+    """
+    observed = request.observed_state or {}
+    if not isinstance(observed, Mapping):
+        return None
+    return _as_float(observed.get("score"))
+
+
+# ---------------------------------------------------------------------------
+# Evaluation-method observe/measure model (parse + validate)
+# ---------------------------------------------------------------------------
+
+
+def method_is_measurable(method: Mapping[str, object]) -> bool:
+    """Whether a node with this method is *measurable* (has an auto-score).
+
+    Every goal is observable, but only *measurable* ones carry a
+    programmatically-computed 0–100 score. When the user has not stated the
+    ``measurable`` flag we default to ``True`` for backward compatibility: a
+    legacy method (metric ``weights`` / task ``state_scores``, or none at all)
+    keeps its computed-metrics score. A node is non-measurable only when the
+    user explicitly sets ``measurable: false`` — it then has an observation +
+    qualitative status but no auto-score.
+    """
+    flag = method.get("measurable")
+    if isinstance(flag, bool):
+        return flag
+    return True
+
+
+def parse_observation(method: Mapping[str, object]) -> Optional[ObservationSpec]:
+    """Return the typed :class:`ObservationSpec` in ``method``, if present."""
+    raw = method.get("observation")
+    if not isinstance(raw, Mapping):
+        return None
+    data = {str(key): value for key, value in raw.items()}
+    source = data.get("source")
+    prompt = data.get("prompt")
+    ref = data.get("ref")
+    return ObservationSpec(
+        source=str(source) if source is not None else "",
+        prompt=str(prompt) if prompt is not None else "",
+        ref={str(k): v for k, v in ref.items()} if isinstance(ref, Mapping) else None,
+    )
+
+
+def method_scoring_prompt(method: Mapping[str, object]) -> str:
+    """Return the user's scoring prompt from ``method`` (``""`` when absent)."""
+    scoring = method.get("scoring")
+    if isinstance(scoring, Mapping):
+        data = {str(key): value for key, value in scoring.items()}
+        prompt = data.get("prompt")
+        return str(prompt).strip() if prompt is not None else ""
+    return ""
+
+
+def validate_evaluation_method(method: Mapping[str, object]) -> None:
+    """Validate the observe/measure shape of a user-authored method.
+
+    Only enforced once the user opts into the new model by stating the
+    ``measurable`` flag — legacy ``weights`` / ``state_scores`` methods (no
+    ``measurable`` key) pass through unchanged. Rules:
+
+    * ``measurable`` must be a bool.
+    * An ``observation`` is required, with a valid :data:`OBSERVATION_SOURCES`
+      source and a non-empty prompt; an ``external`` source must carry a ``ref``
+      handle (the db/api/mcp target) since there is nothing internal to read.
+    * ``measurable: true`` requires a non-empty ``scoring.prompt`` (the rule that
+      programmatically computes the 0–100 score from the observed state).
+    * ``measurable: false`` must NOT carry a scoring prompt (qualitative status
+      only — no auto-score).
+
+    Raises :class:`ValueError` on any violation. The score itself is always
+    engine-computed + clamped, never taken from the method.
+    """
+    if "measurable" not in method:
+        return
+    measurable = method.get("measurable")
+    if not isinstance(measurable, bool):
+        raise ValueError("evaluation method 'measurable' must be a boolean")
+
+    observation = parse_observation(method)
+    if observation is None:
+        raise ValueError(
+            "an evaluation method must carry an 'observation' "
+            "{source, prompt, ref?} (every goal is observable)"
+        )
+    if observation.source not in OBSERVATION_SOURCES:
+        raise ValueError(
+            f"observation.source must be one of {OBSERVATION_SOURCES}, "
+            f"got {observation.source!r}"
+        )
+    if not observation.prompt.strip():
+        raise ValueError("observation.prompt must be a non-empty string")
+    if observation.source == "external" and observation.ref is None:
+        raise ValueError(
+            "an 'external' observation must carry a 'ref' handle "
+            "(the db/api/mcp target to observe)"
+        )
+
+    scoring_prompt = method_scoring_prompt(method)
+    if measurable and not scoring_prompt:
+        raise ValueError(
+            "a measurable goal/task requires a 'scoring' {prompt} that "
+            "programmatically computes the 0–100 score from the observed state"
+        )
+    if not measurable and scoring_prompt:
+        raise ValueError(
+            "a non-measurable goal/task must not carry a scoring prompt "
+            "(its status is qualitative / user-confirmed, with no auto-score)"
+        )
 
 
 @dataclass(frozen=True)
@@ -458,11 +644,16 @@ class GtsCentre:
         store: "SupabaseAppStore",
         *,
         audit_sink: Optional[GtsAuditSink] = None,
+        score_evaluator: Optional[GtsScoreEvaluator] = None,
     ) -> None:
         self._store = store
         self._goals = GoalRegistryStore(store)
         self._tasks = TaskRegistryStore(store)
         self._audit_sink = audit_sink
+        # The scoring-prompt execution seam for measurable nodes. Deterministic
+        # default; a real executor (LLM / db / api / mcp) can be injected here
+        # without touching this Core engine.
+        self._score_evaluator = score_evaluator or default_score_evaluator
 
     @property
     def mode(self) -> str:
@@ -1300,12 +1491,17 @@ class GtsCentre:
     ) -> EvaluationMethod:
         """Set/replace the evaluation method for a goal or task — **user only**.
 
-        The runtime agent is refused and audited (C5/C8): the method governs
-        *how* a node scores and is a Core-protected field (C7/C9). The agent may
-        still record measurements/progress, which does not touch the method.
+        The runtime agent is refused and audited (C5/C8): the method — the
+        observation prompt, the ``measurable`` flag, and the scoring prompt —
+        governs *how* a node scores and is a Core-protected, user-owned field
+        (C7/C9). The agent may still record observations/measurements/progress,
+        which does not touch the method.
         """
         if target_kind not in _TARGET_KINDS:
             raise ValueError(f"Unknown evaluation target_kind: {target_kind!r}")
+        # Authority first (C7/C9): the agent is refused + audited before we
+        # even validate the method shape — setting the observe/measure method
+        # is user-only.
         self._require_user(
             actor,
             principal.user_id,
@@ -1313,6 +1509,7 @@ class GtsCentre:
             target_kind=target_kind,
             target_ref=target_id,
         )
+        validate_evaluation_method(method)
         own = connection is None
         conn = connection or await self._connect()
         try:
@@ -1414,6 +1611,98 @@ class GtsCentre:
             return await self._get_goal_node(principal, target_id, conn) is not None
         return await self._get_task_node(principal, target_id, conn) is not None
 
+    # -- observation (recorded state — NOT the user-owned method) ----------
+
+    async def record_observation(
+        self,
+        principal: Principal,
+        target_kind: str,
+        target_id: str,
+        observed: Mapping[str, object],
+        *,
+        actor: GtsActor = "user",
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> Dict[str, object]:
+        """Record the latest *observed state* of a goal/task and return it.
+
+        This is **data**, not the evaluation *method*: it is the result of
+        carrying out the observation prompt (reading internal state, an external
+        db/api/mcp tool, or the user's answer). Like recording metrics/progress
+        it is allowed for both the user and the runtime agent — the agent is
+        only refused on the user-owned method (observation prompt / measurable
+        flag / scoring prompt), never on recording what was observed.
+
+        For a **measurable** node the observed state feeds the scoring seam (a
+        numeric ``score`` key drives the default evaluator); for a
+        **non-measurable** node it holds the qualitative ``status``. Stored on
+        the additive ``observed_state`` column — never in the locked method.
+        """
+        if target_kind not in _TARGET_KINDS:
+            raise ValueError(f"Unknown evaluation target_kind: {target_kind!r}")
+        payload = {str(key): value for key, value in dict(observed).items()}
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            await self._require_target_readable(
+                principal, target_kind, target_id, conn
+            )
+            table = GOALS_TABLE if target_kind == "goal" else TASKS_TABLE
+            await conn.execute(
+                f"UPDATE {table} SET observed_state = $2::jsonb, updated_at = NOW() "
+                f"WHERE id = $1",
+                target_id,
+                json.dumps(payload, sort_keys=True),
+            )
+            self._audit(
+                actor=actor,
+                actor_user_id=principal.user_id,
+                action="record_observation",
+                target_kind=target_kind,
+                target_ref=target_id,
+                decision="recorded",
+                reason=f"recorded observed state ({actor})",
+            )
+            return payload
+        finally:
+            if own:
+                await conn.close()
+
+    async def get_observation(
+        self,
+        principal: Principal,
+        target_kind: str,
+        target_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> Dict[str, object]:
+        """Return the recorded observed state for a readable goal/task ({} if none)."""
+        if target_kind not in _TARGET_KINDS:
+            raise ValueError(f"Unknown evaluation target_kind: {target_kind!r}")
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            if not await self._target_readable(
+                principal, target_kind, target_id, conn
+            ):
+                return {}
+            return await self._observed_state(conn, target_kind, target_id)
+        finally:
+            if own:
+                await conn.close()
+
+    async def _observed_state(
+        self,
+        conn: "asyncpg.Connection",
+        target_kind: str,
+        target_id: str,
+    ) -> Dict[str, object]:
+        table = GOALS_TABLE if target_kind == "goal" else TASKS_TABLE
+        raw = await conn.fetchval(
+            f"SELECT observed_state FROM {table} WHERE id = $1",
+            target_id,
+        )
+        return _load_method(raw)
+
     # -- scoring (always computed; clamped; rolled up) ---------------------
 
     async def recompute_goal_score(
@@ -1422,13 +1711,17 @@ class GtsCentre:
         goal_id: str,
         *,
         connection: Optional["asyncpg.Connection"] = None,
-    ) -> float:
+    ) -> Optional[float]:
         """Recompute + persist a goal's score bottom-up and return it.
 
-        A goal with sub-goals rolls their (recomputed) scores up by priority
-        weight; a leaf goal scores from its FG-04 metrics under the user's
-        evaluation-method weights. Always clamped to ``[0, 100]``; never
-        hand-set.
+        A goal with sub-goals rolls its **measurable** children's (recomputed)
+        scores up by priority weight; a measurable leaf goal is scored either
+        from a user-supplied scoring prompt over its observed state (the new
+        observe/measure model) or, for a legacy method, from its FG-04 metrics
+        under the user's evaluation-method weights. A **non-measurable** goal
+        has no auto-score — it returns (and persists) ``None`` and is excluded
+        from any parent rollup. Any computed score is always clamped to
+        ``[0, 100]`` and never hand-set.
         """
         own = connection is None
         conn = connection or await self._connect()
@@ -1443,7 +1736,7 @@ class GtsCentre:
         principal: Principal,
         goal_id: str,
         conn: "asyncpg.Connection",
-    ) -> float:
+    ) -> Optional[float]:
         goal = await self._get_goal_node(principal, goal_id, conn)
         if goal is None:
             raise PermissionError(
@@ -1453,21 +1746,44 @@ class GtsCentre:
             principal, parent_goal_id=goal_id, connection=conn
         )
         if children:
+            # Roll up only the measurable children (those with a real score).
             child_scores: List[Tuple[float, str]] = []
             for child in children:
                 child_score = await self._recompute_goal_score(
                     principal, child.id, conn
                 )
-                child_scores.append((child_score, child.priority))
-            score = rollup_score(child_scores)
+                if child_score is not None:
+                    child_scores.append((child_score, child.priority))
+            score = rollup_score(child_scores) if child_scores else None
         else:
-            metrics = await self._goals.list_metrics(
-                principal, goal_id, connection=conn
-            )
-            weights = _method_weights(
-                await self._method_json(conn, "goal", goal_id)
-            )
-            score = score_from_metrics(metrics, weights=weights)
+            method = await self._method_json(conn, "goal", goal_id)
+            if not method_is_measurable(method):
+                score = None
+            else:
+                scoring_prompt = method_scoring_prompt(method)
+                observation = parse_observation(method)
+                if scoring_prompt and observation is not None:
+                    # New observe/measure path: run the scoring prompt over the
+                    # recorded observed state via the (clamped) evaluator seam.
+                    observed = await self._observed_state(conn, "goal", goal_id)
+                    raw = self._score_evaluator(
+                        ScoringRequest(
+                            target_kind="goal",
+                            target_id=goal_id,
+                            observation=observation,
+                            scoring_prompt=scoring_prompt,
+                            observed_state=observed,
+                            mode=self.mode,
+                        )
+                    )
+                    score = clamp_score(raw) if raw is not None else None
+                else:
+                    # Legacy path: compute from FG-04 metrics under weights.
+                    metrics = await self._goals.list_metrics(
+                        principal, goal_id, connection=conn
+                    )
+                    weights = _method_weights(method)
+                    score = score_from_metrics(metrics, weights=weights)
         await conn.execute(
             f"UPDATE {GOALS_TABLE} SET score = $2 WHERE id = $1",
             goal_id,
@@ -1481,12 +1797,15 @@ class GtsCentre:
         task_id: str,
         *,
         connection: Optional["asyncpg.Connection"] = None,
-    ) -> float:
+    ) -> Optional[float]:
         """Recompute + persist a task's score bottom-up and return it.
 
-        A task with sub-tasks rolls their scores up by priority weight; a leaf
-        task scores from its FG-06 progress state (under any user-supplied
-        ``state_scores`` rubric). Always clamped; never hand-set.
+        A task with sub-tasks rolls its **measurable** children's scores up by
+        priority weight; a measurable leaf task is scored from a user scoring
+        prompt over its observed state, or (legacy) from its FG-06 progress
+        state under any user-supplied ``state_scores`` rubric. A
+        **non-measurable** task has no auto-score (returns ``None`` and is
+        excluded from rollup). Any computed score is clamped; never hand-set.
         """
         own = connection is None
         conn = connection or await self._connect()
@@ -1501,7 +1820,7 @@ class GtsCentre:
         principal: Principal,
         task_id: str,
         conn: "asyncpg.Connection",
-    ) -> float:
+    ) -> Optional[float]:
         task = await self._get_task_node(principal, task_id, conn)
         if task is None:
             raise PermissionError(
@@ -1520,22 +1839,41 @@ class GtsCentre:
                 child_score = await self._recompute_task_score(
                     principal, child.id, conn
                 )
-                child_scores.append((child_score, child.priority))
-            score = rollup_score(child_scores)
+                if child_score is not None:
+                    child_scores.append((child_score, child.priority))
+            score = rollup_score(child_scores) if child_scores else None
         else:
-            progress_states = await self._tasks.progress_states(
-                principal, task_id, connection=conn
-            )
-            state_scores = _method_state_scores(
-                await self._method_json(conn, "task", task_id)
-            )
-            score = score_from_progress(
-                progress_states,
-                task.current_state,
-                task.completion_state,
-                status=task.status,
-                state_scores=state_scores,
-            )
+            method = await self._method_json(conn, "task", task_id)
+            if not method_is_measurable(method):
+                score = None
+            else:
+                scoring_prompt = method_scoring_prompt(method)
+                observation = parse_observation(method)
+                if scoring_prompt and observation is not None:
+                    observed = await self._observed_state(conn, "task", task_id)
+                    raw = self._score_evaluator(
+                        ScoringRequest(
+                            target_kind="task",
+                            target_id=task_id,
+                            observation=observation,
+                            scoring_prompt=scoring_prompt,
+                            observed_state=observed,
+                            mode=self.mode,
+                        )
+                    )
+                    score = clamp_score(raw) if raw is not None else None
+                else:
+                    progress_states = await self._tasks.progress_states(
+                        principal, task_id, connection=conn
+                    )
+                    state_scores = _method_state_scores(method)
+                    score = score_from_progress(
+                        progress_states,
+                        task.current_state,
+                        task.completion_state,
+                        status=task.status,
+                        state_scores=state_scores,
+                    )
         await conn.execute(
             f"UPDATE {TASKS_TABLE} SET score = $2 WHERE id = $1",
             task_id,
@@ -1745,6 +2083,7 @@ def _append_local_audit(event: GtsAuditEvent) -> None:
 __all__ = [
     "EVALUATION_METHODS_TABLE",
     "GOAL_LEVELS",
+    "OBSERVATION_SOURCES",
     "SKILLS_TABLE",
     "TASK_GOALS_TABLE",
     "TASK_SKILLS_TABLE",
@@ -1756,12 +2095,21 @@ __all__ = [
     "GtsCycleError",
     "GtsError",
     "GtsGoal",
+    "GtsScoreEvaluator",
     "GtsTask",
+    "ObservationSource",
+    "ObservationSpec",
+    "ScoringRequest",
     "SkillNode",
     "clamp_score",
+    "default_score_evaluator",
     "gts_audit_log_path",
+    "method_is_measurable",
+    "method_scoring_prompt",
+    "parse_observation",
     "render_gts_block",
     "rollup_score",
     "score_from_metrics",
     "score_from_progress",
+    "validate_evaluation_method",
 ]

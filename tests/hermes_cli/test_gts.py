@@ -19,11 +19,18 @@ from hermes_cli.gts import (
     GtsAuthorityError,
     GtsCentre,
     GtsGoal,
+    ObservationSpec,
+    ScoringRequest,
     clamp_score,
+    default_score_evaluator,
+    method_is_measurable,
+    method_scoring_prompt,
+    parse_observation,
     render_gts_block,
     rollup_score,
     score_from_metrics,
     score_from_progress,
+    validate_evaluation_method,
 )
 
 
@@ -206,9 +213,185 @@ async def test_agent_refused_on_evaluation_method_is_audited() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_refused_on_observe_measure_method_is_audited() -> None:
+    # The observation prompt, measurable flag, and scoring prompt are all part
+    # of the user-owned evaluation method — the agent is refused + audited even
+    # for a perfectly well-formed new-model method (authority precedes the DB).
+    events: list[dict] = []
+    centre = GtsCentre(_FakeStore(), audit_sink=events.append)
+
+    with pytest.raises(GtsAuthorityError):
+        await centre.set_evaluation_method(
+            _user(),
+            "goal",
+            "goal-9",
+            {
+                "measurable": True,
+                "observation": {"source": "external", "prompt": "poll",
+                                "ref": {"tool": "crm"}},
+                "scoring": {"prompt": "compute 0-100"},
+            },
+            actor="agent",
+            connection=object(),
+        )
+
+    assert [e["decision"] for e in events] == ["refused"]
+    assert events[0]["kind"] == "core_denied"
+    assert events[0]["action"] == "set an evaluation method"
+
+
+@pytest.mark.asyncio
 async def test_unknown_evaluation_target_kind_is_rejected() -> None:
     centre = GtsCentre(_FakeStore())
     with pytest.raises(ValueError):
         await centre.set_evaluation_method(
             _user(), "campaign", "x", {}, actor="user", connection=object()
         )
+
+
+# --- observe/measure model: typing + parsing -------------------------------
+
+
+def _observed_method(
+    *, measurable: bool, source: str = "internal", **extra: object
+) -> dict:
+    method: dict = {
+        "measurable": measurable,
+        "observation": {"source": source, "prompt": "how to observe"},
+    }
+    if measurable:
+        method["scoring"] = {"prompt": "compute 0-100 from observed state"}
+    method.update(extra)
+    return method
+
+
+def test_parse_observation_types_the_source_prompt_and_ref() -> None:
+    spec = parse_observation(
+        {
+            "observation": {
+                "source": "external",
+                "prompt": "poll the CRM",
+                "ref": {"kind": "mcp", "tool": "crm.count"},
+            }
+        }
+    )
+    assert isinstance(spec, ObservationSpec)
+    assert spec.source == "external"
+    assert spec.prompt == "poll the CRM"
+    assert spec.ref == {"kind": "mcp", "tool": "crm.count"}
+    # A method with no observation returns None.
+    assert parse_observation({"weights": {"m": 1.0}}) is None
+
+
+def test_measurable_defaults_true_for_legacy_methods() -> None:
+    # Legacy metric/state methods (no explicit flag) stay measurable.
+    assert method_is_measurable({}) is True
+    assert method_is_measurable({"weights": {"m": 1.0}}) is True
+    # Explicit flags are honoured.
+    assert method_is_measurable(_observed_method(measurable=True)) is True
+    assert method_is_measurable(_observed_method(measurable=False)) is False
+
+
+def test_validate_accepts_a_measurable_method_with_scoring_prompt() -> None:
+    validate_evaluation_method(_observed_method(measurable=True))
+    assert method_scoring_prompt(_observed_method(measurable=True))
+
+
+def test_validate_accepts_a_non_measurable_observation_only_method() -> None:
+    method = _observed_method(measurable=False)
+    validate_evaluation_method(method)
+    # A non-measurable goal keeps an observation but carries no scoring prompt.
+    assert parse_observation(method) is not None
+    assert method_scoring_prompt(method) == ""
+
+
+def test_validate_rejects_bad_observation_source() -> None:
+    with pytest.raises(ValueError):
+        validate_evaluation_method(
+            {
+                "measurable": False,
+                "observation": {"source": "carrier-pigeon", "prompt": "p"},
+            }
+        )
+
+
+def test_validate_requires_a_non_empty_observation_prompt() -> None:
+    with pytest.raises(ValueError):
+        validate_evaluation_method(
+            {"measurable": False, "observation": {"source": "ask", "prompt": "   "}}
+        )
+
+
+def test_validate_requires_ref_for_external_source() -> None:
+    with pytest.raises(ValueError):
+        validate_evaluation_method(
+            {
+                "measurable": False,
+                "observation": {"source": "external", "prompt": "poll"},
+            }
+        )
+
+
+def test_validate_requires_scoring_prompt_when_measurable() -> None:
+    with pytest.raises(ValueError):
+        validate_evaluation_method(
+            {
+                "measurable": True,
+                "observation": {"source": "internal", "prompt": "watch"},
+            }
+        )
+
+
+def test_validate_forbids_scoring_prompt_when_not_measurable() -> None:
+    with pytest.raises(ValueError):
+        validate_evaluation_method(
+            {
+                "measurable": False,
+                "observation": {"source": "internal", "prompt": "watch"},
+                "scoring": {"prompt": "score it"},
+            }
+        )
+
+
+def test_validate_requires_observation_once_measurable_declared() -> None:
+    with pytest.raises(ValueError):
+        validate_evaluation_method({"measurable": True})
+
+
+def test_validate_ignores_legacy_methods_without_the_flag() -> None:
+    # No exception: legacy weights/state_scores methods pass straight through.
+    validate_evaluation_method({"weights": {"m": 1.0}})
+    validate_evaluation_method({"state_scores": {"done": 100.0}})
+
+
+# --- scoring-prompt seam → clamped score ------------------------------------
+
+
+def _scoring_request(observed: dict) -> ScoringRequest:
+    return ScoringRequest(
+        target_kind="goal",
+        target_id="g1",
+        observation=ObservationSpec(source="internal", prompt="observe"),
+        scoring_prompt="score",
+        observed_state=observed,
+        mode="dev",
+    )
+
+
+def test_default_evaluator_reads_numeric_score_from_observed_state() -> None:
+    assert default_score_evaluator(_scoring_request({"score": 73})) == 73.0
+    # Nothing observed yet → None (the node stays unscored, never guessed).
+    assert default_score_evaluator(_scoring_request({})) is None
+    assert default_score_evaluator(_scoring_request({"status": "green"})) is None
+
+
+def test_default_evaluator_output_is_clamped_by_the_engine_contract() -> None:
+    # The evaluator returns the raw value; the engine clamps. Prove the raw
+    # passthrough here and clamp composition explicitly.
+    raw_over = default_score_evaluator(_scoring_request({"score": 250}))
+    raw_under = default_score_evaluator(_scoring_request({"score": -40}))
+    assert isinstance(raw_over, float) and isinstance(raw_under, float)
+    assert raw_over == 250.0
+    assert raw_under == -40.0
+    assert clamp_score(raw_over) == 100.0
+    assert clamp_score(raw_under) == 0.0

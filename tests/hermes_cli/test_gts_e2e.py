@@ -303,6 +303,93 @@ async def test_score_is_computed_clamped_and_rolls_up(postgres_dsn: str) -> None
 
 
 @pytest.mark.asyncio
+async def test_observe_measure_model_scoring_rollup_and_authority(
+    postgres_dsn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    sink: list[dict] = []
+    centre = await _fresh_centre(postgres_dsn, audit_sink=sink.append)
+    alice = _principal("alice")
+    bob = _principal("bob")
+
+    top = await centre.create_goal(alice, "North star", actor="user")
+    # Measurable child: user-owned observation + scoring prompt (observe/measure).
+    measurable = await centre.create_goal(
+        alice, "Measurable child", actor="agent", parent_goal_id=top.id,
+        priority="critical",
+    )
+    await centre.set_evaluation_method(
+        alice, "goal", measurable.id,
+        {
+            "measurable": True,
+            "observation": {
+                "source": "external",
+                "prompt": "count paying customers via the CRM",
+                "ref": {"kind": "mcp", "tool": "crm.count"},
+            },
+            "scoring": {"prompt": "score = pct of the 100-customer target"},
+        },
+        actor="user",
+    )
+    # Non-measurable child: observation only, qualitative/user-confirmed status.
+    qualitative = await centre.create_goal(
+        alice, "Qualitative child", actor="agent", parent_goal_id=top.id,
+        priority="low",
+    )
+    await centre.set_evaluation_method(
+        alice, "goal", qualitative.id,
+        {
+            "measurable": False,
+            "observation": {
+                "source": "ask",
+                "prompt": "ask the user whether morale feels healthy",
+            },
+        },
+        actor="user",
+    )
+
+    # The runtime agent may NOT set/manage the observe/measure method…
+    with pytest.raises(GtsAuthorityError):
+        await centre.set_evaluation_method(
+            alice, "goal", measurable.id,
+            {
+                "measurable": True,
+                "observation": {"source": "internal", "prompt": "agent tries"},
+                "scoring": {"prompt": "agent scoring"},
+            },
+            actor="agent",
+        )
+    # …but recording the *observed state* is data, allowed for the agent. The
+    # programmatic 250 is clamped to 100 by the engine (never hand-set).
+    await centre.record_observation(
+        alice, "goal", measurable.id, {"score": 250}, actor="agent"
+    )
+    await centre.record_observation(
+        alice, "goal", qualitative.id, {"status": "healthy"}, actor="user"
+    )
+
+    top_score = await centre.recompute_goal_score(alice, top.id)
+    # Measurable leaf scored via the seam + clamped; qualitative leaf unscored.
+    assert (await centre.get_goal(alice, measurable.id)).score == pytest.approx(100.0)
+    assert (await centre.get_goal(alice, qualitative.id)).score is None
+    # Rollup runs ONLY over measurable children → equals the one measurable leaf.
+    assert top_score == pytest.approx(100.0)
+
+    # Observed state is readable by the owner, invisible to another user (C2).
+    assert (await centre.get_observation(alice, "goal", qualitative.id)) == {
+        "status": "healthy"
+    }
+    assert await centre.get_observation(bob, "goal", qualitative.id) == {}
+
+    # The agent's method-mutation attempt is refused + durably audited.
+    log = gts_audit_log_path()
+    rows = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+    denied = [r for r in rows if r["decision"] == "refused"]
+    assert any(r["action"] == "set an evaluation method" for r in denied)
+    assert all(r["kind"] == "core_denied" for r in denied)
+
+
+@pytest.mark.asyncio
 async def test_negative_access_across_users(postgres_dsn: str) -> None:
     centre = await _fresh_centre(postgres_dsn)
     alice = _principal("alice")
