@@ -33,12 +33,22 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+import uuid
 import zipfile
 
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
 import urllib.request
 from pathlib import Path
-from typing import Any, cast, Dict, List, Optional, Tuple
+from typing import Any, cast, Dict, List, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hermes_cli.gts import EvaluationMethod
+    from hermes_cli.access import Principal
+    from hermes_cli.webview import (
+        WebviewAction,
+        WebviewRegistry,
+        WebviewSession,
+    )
 
 import yaml
 
@@ -3479,6 +3489,508 @@ async def comms_get_trace(trace_id: str, request: Request):
         "interactions": [event.as_dict() for event in interactions],
         "rollup": rollup.as_dict() if rollup else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# FG-17b Core-area view — FG-14 C7 boundary projection (read-only)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/core/manifest")
+async def core_manifest_view(limit: int = 50):
+    """FG-14 Core-boundary projection for the FG-17 Core-area view (read-only).
+
+    Surfaces the machine-readable C7 boundary the runtime agent may never
+    cross: the active ``core_manifest.yaml`` globs, whether the manifest is
+    present + parseable (vs the fail-closed baked-in fallback set), and a tail
+    of the durable local Core-denial audit log (agent writes refused at the
+    boundary). Core is immutable to the runtime agent and is changed only by
+    humans through the repo/PR flow, so this endpoint is strictly read-only —
+    it exposes the boundary, it does not mutate it. FG-12 change log and FG-16
+    traces are surfaced separately by their existing scoped endpoints.
+    """
+    from agent.core_boundary import (
+        classify_core_path,
+        core_audit_log_path,
+        get_core_root,
+        load_core_globs,
+    )
+
+    core_root = get_core_root()
+    manifest_path = core_root / "core_manifest.yaml"
+
+    manifest_present = manifest_path.exists()
+    manifest_parseable = False
+    parsed_globs: list[str] = []
+    if manifest_present:
+        try:
+            raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and isinstance(raw.get("core_globs"), list):
+                parsed_globs = [
+                    g.strip()
+                    for g in raw["core_globs"]
+                    if isinstance(g, str) and g.strip()
+                ]
+                manifest_parseable = bool(parsed_globs)
+        except Exception:
+            manifest_parseable = False
+
+    # The authoritative active globs (manifest when valid, else fail-closed
+    # fallback). ``fallback_active`` tells the UI the boundary is running on the
+    # baked-in copy because the manifest is missing/corrupt — a health signal.
+    active_globs = list(load_core_globs())
+    fallback_active = not (manifest_present and manifest_parseable)
+
+    # A self-check: the manifest + guard module classify as Core themselves
+    # (self-protecting boundary). Surfaced so the view can assert the guard is
+    # protecting its own definition.
+    self_protected = classify_core_path(manifest_path) is not None
+
+    try:
+        limit_n = min(500, max(1, int(limit)))
+    except (TypeError, ValueError):
+        limit_n = 50
+
+    denials: list[dict] = []
+    audit_path = core_audit_log_path()
+    try:
+        if audit_path.exists():
+            lines = audit_path.read_text(encoding="utf-8").splitlines()
+            for line in lines[-limit_n:]:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    denials.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        denials = []
+    denials.reverse()  # most-recent first
+
+    return {
+        "core_root": core_root.name,
+        "manifest_path": "core_manifest.yaml",
+        "manifest_present": manifest_present,
+        "manifest_parseable": manifest_parseable,
+        "fallback_active": fallback_active,
+        "self_protected": self_protected,
+        "globs": active_globs,
+        "glob_count": len(active_globs),
+        "audit_log_path": str(audit_path),
+        "denials": denials,
+    }
+
+
+# ---------------------------------------------------------------------------
+# FG-17b GTS Centre — FG-18 C9 unified goal/task/skill graph (read-only)
+# ---------------------------------------------------------------------------
+
+
+def _gts_method_summary(method: "Optional[EvaluationMethod]") -> dict:
+    """Project an EvaluationMethod's observe/measure shape for the UI (no score)."""
+    from hermes_cli.gts import (
+        method_is_measurable,
+        method_scoring_prompt,
+        parse_observation,
+    )
+
+    raw = method.method if method is not None else {}
+    observation = parse_observation(raw)
+    return {
+        "set_by_user_id": method.set_by_user_id if method is not None else None,
+        "locked": bool(method.locked) if method is not None else False,
+        "measurable": method_is_measurable(raw),
+        "observation": observation.as_dict() if observation is not None else None,
+        "scoring_prompt": method_scoring_prompt(raw),
+    }
+
+
+@app.get("/api/gts/graph")
+async def gts_graph_view(request: Request):
+    """FG-18 GTS Centre graph for the FG-17 GTS Centre UI (C2-scoped, read-only).
+
+    Returns the unified goal→task→skill graph visible to the resolved C1/C2
+    principal: goal + task hierarchy (parent refs + level), priorities,
+    computed 0–100 scores, the M:N task↔goal and task↔skill edges, and each
+    node's user-owned observe/measure evaluation method (never the score, which
+    is always engine-computed). The GTS Centre is Core (D14): its data is read
+    here, never mutated — creation/scoring stay on the CLI/agent authority
+    paths. Per-user assignment (FG-19) is live: each task/sub-goal node carries
+    its ``assignee_user_id`` plus the per-item grants (assignee + watchers)
+    visible to the resolved principal, all scoped through the existing C2
+    ``?as=`` seam and the item_grants RLS.
+    """
+    from hermes_cli.gts import GtsCentre
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return {
+            "configured": False,
+            "principal": None,
+            "goals": [],
+            "tasks": [],
+            "skills": [],
+            "task_goals": [],
+            "task_skills": [],
+            "assignment": {"enabled": True, "scheme": "per-user"},
+        }
+
+    store = _comms_app_store()
+    centre = GtsCentre(store)
+    try:
+        conn = await store.connect()
+        await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{store.schema}"')
+    except RuntimeError:
+        return {
+            "configured": False,
+            "principal": None,
+            "goals": [],
+            "tasks": [],
+            "skills": [],
+            "task_goals": [],
+            "task_skills": [],
+            "assignment": {"enabled": True, "scheme": "per-user"},
+        }
+    try:
+        await centre.initialize(connection=conn)
+
+        goals = await centre.list_goals(principal, connection=conn)
+        goal_payload = []
+        for goal in goals:
+            method = await centre.get_evaluation_method(
+                principal, "goal", goal.id, connection=conn
+            )
+            entry = goal.as_dict()
+            entry["evaluation_method"] = _gts_method_summary(method)
+            entry["grants"] = [
+                g.as_dict()
+                for g in await centre.list_grants(
+                    principal, "goal", goal.id, connection=conn
+                )
+            ]
+            goal_payload.append(entry)
+
+        skills = await centre.list_skills(principal, connection=conn)
+
+        task_records = await centre.tasks.list_tasks(principal, connection=conn)
+        task_payload = []
+        task_goals: list[dict] = []
+        task_skills: list[dict] = []
+        for record in task_records:
+            task = await centre.get_task(principal, record.id, connection=conn)
+            if task is None:
+                continue
+            method = await centre.get_evaluation_method(
+                principal, "task", task.id, connection=conn
+            )
+            entry = task.as_dict()
+            entry["evaluation_method"] = _gts_method_summary(method)
+            entry["grants"] = [
+                g.as_dict()
+                for g in await centre.list_grants(
+                    principal, "task", task.id, connection=conn
+                )
+            ]
+            task_payload.append(entry)
+
+            for linked_goal in await centre.goals_for_task(
+                principal, task.id, connection=conn
+            ):
+                task_goals.append({"task_id": task.id, "goal_id": linked_goal.id})
+            for linked_skill in await centre.skills_for_task(
+                principal, task.id, connection=conn
+            ):
+                task_skills.append({"task_id": task.id, "skill_id": linked_skill.id})
+    finally:
+        await conn.close()
+
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "mode": centre.mode,
+        "goals": goal_payload,
+        "tasks": task_payload,
+        "skills": [skill.as_dict() for skill in skills],
+        "task_goals": task_goals,
+        "task_skills": task_skills,
+        # FG-19 (merged): per-user assignment. Node payloads carry
+        # ``assignee_user_id`` and a ``grants`` list (assignee + watchers)
+        # scoped to the principal via item_grants RLS; top-level goals remain
+        # non-assignable.
+        "assignment": {"enabled": True, "scheme": "per-user"},
+    }
+
+
+# ---------------------------------------------------------------------------
+# FG-17b Agent webview — CDP-backed, consent-gated (C6) + traced (C8).
+# Consent model = Option B (session-scoped consent + escalation): default-deny
+# / opt-in, per-user CDP-profile isolation, in-scope reads autonomous,
+# off-scope / interactive-under-read-only / credentialed / destructive actions
+# escalate to per-action approval. See ``hermes_cli/webview.py`` for the pure
+# policy engine and the FG-17 doc for the scope model.
+# ---------------------------------------------------------------------------
+
+_webview_registry: "Optional[WebviewRegistry]" = None
+
+
+def _get_webview_registry() -> "WebviewRegistry":
+    """Process-wide per-user webview registry (browser sessions are ephemeral).
+
+    Profiles live under ``<hermes_home>/webview/profiles`` and are keyed per
+    principal so no two users share cookies/local-state — the C2 isolation
+    boundary for this surface.
+    """
+    global _webview_registry
+    if _webview_registry is None:
+        from hermes_cli.webview import WebviewRegistry
+
+        profiles_root = str(get_hermes_home() / "webview" / "profiles")
+        _webview_registry = WebviewRegistry(profiles_root)
+    return _webview_registry
+
+
+async def _webview_emit(
+    session: "WebviewSession",
+    principal: "Principal",
+    *,
+    kind: str,
+    ref: str,
+    summary: str,
+) -> None:
+    """Best-effort C8 trace of a webview decision (degrades when unconfigured).
+
+    Reuses the FG-16 interaction ledger + existing interaction kinds
+    (``tool_call`` for executed actions, ``approval`` for escalations) so the
+    action shows up in the same trace list/detail the Core-area view reads —
+    no new C8 contract. Never raises into the request path.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        from hermes_cli.interactions import Interaction, InteractionLedger
+
+        store = _comms_app_store()
+        if getattr(store, "dsn", None) in (None, ""):
+            return
+        interaction = Interaction(
+            id=f"int_{uuid.uuid4().hex}",
+            trace_id=session.trace_id,
+            parent_id=None,
+            ts=datetime.now(timezone.utc),
+            actor_user_id=principal.user_id,
+            session_key=session.id,
+            platform="webview",
+            kind=kind,  # type: ignore[arg-type]
+            ref=ref,
+            summary=summary,
+            payload_ref=None,
+            mode=store.mode,
+        )
+        ledger = InteractionLedger(store, config=load_config() or {})
+        await ledger.append(interaction)
+    except Exception:
+        # C8 is observability-only; never let a trace failure block the action.
+        return
+
+
+# CDP method mapping for the safe, in-scope autonomous actions. Interactive /
+# escalated actions are dispatched by the same handoff once approved.
+_WEBVIEW_CDP_METHODS: Dict[str, str] = {
+    "navigate": "Page.navigate",
+    "screenshot": "Page.captureScreenshot",
+}
+
+
+def _webview_execute(action: "WebviewAction") -> dict:
+    """Hand an approved/allowed action to the existing CDP browser toolset.
+
+    Delegates to ``tools.browser_cdp_tool`` (the FG browser toolset) when a CDP
+    endpoint is configured; otherwise reports the action as dispatched-but-not
+    -driven, the same graceful degradation the datastore-backed endpoints use.
+    Per-user isolation upgrades to a provider-created session bound to the
+    session's ``profile_dir`` on the configured system-test box.
+    """
+    try:
+        from tools.browser_cdp_tool import _browser_cdp_check, browser_cdp
+    except Exception:
+        return {"executed": False, "detail": "browser toolset unavailable"}
+    if not _browser_cdp_check():
+        return {
+            "executed": False,
+            "detail": "no CDP browser attached (connect via /browser)",
+        }
+    method = _WEBVIEW_CDP_METHODS.get(action.kind)
+    if method is None:
+        return {"executed": False, "detail": f"no CDP mapping for {action.kind}"}
+    params = {"url": action.url} if action.kind == "navigate" and action.url else {}
+    result = browser_cdp(method, params)
+    return {"executed": True, "detail": result[:500]}
+
+
+@app.get("/api/webview/session")
+async def webview_get_session(request: Request):
+    """Return the caller's open webview session (C2-scoped), or the default-deny
+    empty state when none is open. ``?as=`` narrows the owner-operator's view to
+    a specific principal — who can only ever see their own session."""
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return {"configured": False, "session": None}
+    session = _get_webview_registry().get(principal.user_id)
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "session": session.as_dict() if session is not None else None,
+    }
+
+
+@app.post("/api/webview/session")
+async def webview_open_session(request: Request):
+    """Opt in: open a webview session with a consent scope (allowed domains +
+    read-only/interactive). Default-deny means nothing runs until this is
+    called. Attributed to the owner principal (never spoofed)."""
+    from hermes_cli.webview import WebviewScope
+
+    try:
+        principal = await _comms_resolve_principal(request)
+    except _CommsNotConfigured:
+        raise HTTPException(status_code=409, detail="multi-user datastore not configured")
+    body = await request.json()
+    domains = body.get("allowed_domains") or []
+    if not isinstance(domains, list):
+        raise HTTPException(status_code=400, detail="allowed_domains must be a list")
+    mode = body.get("mode", "read_only")
+    if mode not in ("read_only", "interactive"):
+        raise HTTPException(status_code=400, detail="mode must be read_only|interactive")
+    scope = WebviewScope(
+        allowed_domains=tuple(str(d).strip() for d in domains if str(d).strip()),
+        mode=mode,
+    )
+    session = _get_webview_registry().open(principal.user_id, scope)
+    await _webview_emit(
+        session,
+        principal,
+        kind="approval",
+        ref="webview:session_open",
+        summary=f"opened webview session (mode={mode}, domains={len(scope.allowed_domains)})",
+    )
+    return {"configured": True, "principal": principal.user_id, "session": session.as_dict()}
+
+
+@app.delete("/api/webview/session")
+async def webview_close_session(request: Request):
+    """Close (opt out of) the caller's webview session."""
+    try:
+        principal = await _comms_resolve_principal(request)
+    except _CommsNotConfigured:
+        raise HTTPException(status_code=409, detail="multi-user datastore not configured")
+    closed = _get_webview_registry().close(principal.user_id)
+    return {"ok": True, "closed": closed}
+
+
+@app.post("/api/webview/action")
+async def webview_action(request: Request):
+    """Request an agent action against the live page. Default-deny: with no open
+    session the request is refused (403). Otherwise the Option-B policy decides
+    allow (run + trace) vs escalate (queue a per-action C6 approval + trace)."""
+    from hermes_cli.webview import WebviewAction, decide
+
+    try:
+        principal = await _comms_resolve_principal(request)
+    except _CommsNotConfigured:
+        raise HTTPException(status_code=409, detail="multi-user datastore not configured")
+    session = _get_webview_registry().get(principal.user_id)
+    if session is None:
+        # Default-deny: no opt-in, nothing to act on.
+        raise HTTPException(status_code=403, detail="no webview session open (default-deny)")
+
+    body = await request.json()
+    kind = body.get("kind")
+    if not kind or not isinstance(kind, str):
+        raise HTTPException(status_code=400, detail="action 'kind' is required")
+    action = WebviewAction(
+        kind=kind,  # type: ignore[arg-type]
+        url=body.get("url"),
+        credentialed=bool(body.get("credentialed", False)),
+        destructive=bool(body.get("destructive", False)),
+    )
+    verdict = decide(session.scope, action)
+
+    if verdict.decision == "allow":
+        outcome = _webview_execute(action)
+        await _webview_emit(
+            session,
+            principal,
+            kind="tool_call",
+            ref=f"webview:{action.kind}",
+            summary=f"{action.kind} {action.url or ''} -> allow",
+        )
+        return {"decision": "allow", "reason": verdict.reason, **outcome}
+
+    # escalate — queue a per-action C6 approval; the action does not run.
+    from hermes_cli.webview import PendingApproval
+    import time as _time
+
+    approval = PendingApproval(
+        id=f"wva_{uuid.uuid4().hex}",
+        action=action,
+        reason=verdict.reason,
+        created_at=_time.time(),
+    )
+    session.pending[approval.id] = approval
+    await _webview_emit(
+        session,
+        principal,
+        kind="approval",
+        ref=f"webview:{action.kind}",
+        summary=f"{action.kind} {action.url or ''} -> escalate ({verdict.reason})",
+    )
+    return {
+        "decision": "escalate",
+        "reason": verdict.reason,
+        "approval": approval.as_dict(),
+    }
+
+
+@app.post("/api/webview/approval/{approval_id}")
+async def webview_resolve_approval(approval_id: str, request: Request):
+    """Grant or deny a queued per-action C6 approval. On grant, the action runs
+    through the same CDP handoff; on deny, it is discarded. Owner-attributed."""
+    try:
+        principal = await _comms_resolve_principal(request)
+    except _CommsNotConfigured:
+        raise HTTPException(status_code=409, detail="multi-user datastore not configured")
+    session = _get_webview_registry().get(principal.user_id)
+    if session is None:
+        raise HTTPException(status_code=403, detail="no webview session open (default-deny)")
+    approval = session.pending.get(approval_id)
+    if approval is None:
+        raise HTTPException(status_code=404, detail="no such pending approval")
+    body = await request.json()
+    grant = bool(body.get("grant", False))
+    approval.resolved = grant
+    if not grant:
+        session.pending.pop(approval_id, None)
+        await _webview_emit(
+            session,
+            principal,
+            kind="approval",
+            ref=f"webview:{approval.action.kind}",
+            summary=f"denied {approval.action.kind} {approval.action.url or ''}",
+        )
+        return {"decision": "deny", "granted": False}
+    outcome = _webview_execute(approval.action)
+    session.pending.pop(approval_id, None)
+    await _webview_emit(
+        session,
+        principal,
+        kind="tool_call",
+        ref=f"webview:{approval.action.kind}",
+        summary=f"approved+ran {approval.action.kind} {approval.action.url or ''}",
+    )
+    return {"decision": "allow", "granted": True, **outcome}
 
 
 @app.post("/api/comms/changes/{change_ref}/undo")

@@ -1313,6 +1313,72 @@ export const api = {
       { method: "POST" },
     ),
   getCommsMemory: () => fetchJSON<CommsMemoryResponse>("/api/comms/memory"),
+
+  // FG-16 interaction trace (C8) — read-only list + detail, C2-scoped. Reused
+  // by the FG-17b Core-area view. ``as`` narrows the owner-operator's C2 view
+  // to a specific principal (an inspection aid, never an escalation).
+  getCommsTraces: (opts?: { as?: string; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.as) params.set("as", opts.as);
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    return fetchJSON<CommsTracesResponse>(
+      `/api/comms/traces${qs ? `?${qs}` : ""}`,
+    );
+  },
+  getCommsTrace: (traceId: string, opts?: { as?: string }) => {
+    const qs = opts?.as ? `?as=${encodeURIComponent(opts.as)}` : "";
+    return fetchJSON<CommsTraceDetailResponse>(
+      `/api/comms/traces/${encodeURIComponent(traceId)}${qs}`,
+    );
+  },
+
+  // FG-14 Core-area boundary projection (C7) — read-only.
+  getCoreManifest: () => fetchJSON<CoreManifestResponse>("/api/core/manifest"),
+
+  // FG-18 GTS Centre graph (C9) — read-only, C2-scoped.
+  getGtsGraph: (opts?: { as?: string }) => {
+    const qs = opts?.as ? `?as=${encodeURIComponent(opts.as)}` : "";
+    return fetchJSON<GtsGraphResponse>(`/api/gts/graph${qs}`);
+  },
+
+  // FG-15 onboarding readiness (first-run wizard).
+  getOnboardingReadiness: () =>
+    fetchJSON<OnboardingReadinessResponse>("/api/onboarding/readiness"),
+
+  // FG-17b agent webview (CDP) — consent-gated (C6) + traced (C8). Default-deny:
+  // nothing runs until a session is opened with an explicit consent scope.
+  getWebviewSession: (opts?: { as?: string }) => {
+    const qs = opts?.as ? `?as=${encodeURIComponent(opts.as)}` : "";
+    return fetchJSON<WebviewSessionResponse>(`/api/webview/session${qs}`);
+  },
+  openWebviewSession: (scope: {
+    allowed_domains: string[];
+    mode: "read_only" | "interactive";
+  }) =>
+    fetchJSON<WebviewSessionResponse>("/api/webview/session", {
+      method: "POST",
+      body: JSON.stringify(scope),
+    }),
+  closeWebviewSession: () =>
+    fetchJSON<{ ok: boolean; closed: boolean }>("/api/webview/session", {
+      method: "DELETE",
+    }),
+  requestWebviewAction: (action: {
+    kind: string;
+    url?: string | null;
+    credentialed?: boolean;
+    destructive?: boolean;
+  }) =>
+    fetchJSON<WebviewActionResponse>("/api/webview/action", {
+      method: "POST",
+      body: JSON.stringify(action),
+    }),
+  resolveWebviewApproval: (approvalId: string, grant: boolean) =>
+    fetchJSON<WebviewActionResponse>(
+      `/api/webview/approval/${encodeURIComponent(approvalId)}`,
+      { method: "POST", body: JSON.stringify({ grant }) },
+    ),
 };
 
 export type CommsNotificationKind = "approval" | "proactive_ask";
@@ -1464,6 +1530,215 @@ export interface CommsMemoryResponse {
   configured: boolean;
   principal?: string | null;
   memories: CommsMemory[];
+}
+
+// ── FG-16 interaction trace (C8) ─────────────────────────────────────
+export interface CommsTraceSummary {
+  trace_id: string;
+  first_ts: string;
+  last_ts: string;
+  actor_user_id: string | null;
+  session_key: string | null;
+  platform: string | null;
+  mode: string;
+  event_count: number;
+  kind_counts: Record<string, number>;
+  rolled_up: boolean;
+}
+
+export interface CommsTracesResponse {
+  configured: boolean;
+  principal?: string | null;
+  traces: CommsTraceSummary[];
+}
+
+export interface CommsInteraction {
+  id: string;
+  trace_id: string;
+  parent_id: string | null;
+  ts: string;
+  actor_user_id: string | null;
+  session_key: string | null;
+  platform: string | null;
+  kind: string;
+  ref: string | null;
+  summary: string | null;
+  payload_ref: string | null;
+  mode: string;
+}
+
+export interface CommsTraceDetailResponse {
+  configured: boolean;
+  principal?: string | null;
+  trace_id: string;
+  interactions: CommsInteraction[];
+  rollup: CommsTraceSummary | null;
+}
+
+// ── FG-14 Core-area boundary projection (C7) ─────────────────────────
+export interface CoreDenial {
+  id: string;
+  ts: number;
+  actor_user_id: string;
+  mode: string;
+  summary: string;
+  op?: { kind?: string; op?: string; path?: string; matched_glob?: string };
+}
+
+export interface CoreManifestResponse {
+  core_root: string;
+  manifest_path: string;
+  manifest_present: boolean;
+  manifest_parseable: boolean;
+  fallback_active: boolean;
+  self_protected: boolean;
+  globs: string[];
+  glob_count: number;
+  audit_log_path: string;
+  denials: CoreDenial[];
+}
+
+// ── FG-18 GTS Centre graph (C9) ──────────────────────────────────────
+export interface GtsObservation {
+  source: string;
+  prompt: string;
+  ref?: Record<string, unknown>;
+}
+
+export interface GtsEvaluationMethod {
+  set_by_user_id: string | null;
+  locked: boolean;
+  measurable: boolean;
+  observation: GtsObservation | null;
+  scoring_prompt: string;
+}
+
+// FG-19 per-item grant (assignee + read-only watchers) attached to a node.
+export interface GtsItemGrant {
+  id: string;
+  item_kind: string;
+  item_id: string;
+  user_id: string;
+  grant: "assignee" | "watcher" | string;
+  granted_by: string;
+  status: string;
+}
+
+export interface GtsGoal {
+  id: string;
+  owner_user_id: string;
+  visibility: string;
+  title: string;
+  priority: string;
+  status: string;
+  level: string;
+  parent_goal_id: string | null;
+  score: number | null;
+  evaluation_method: GtsEvaluationMethod;
+  assignee_user_id: string | null;
+  grants: GtsItemGrant[];
+}
+
+export interface GtsTask {
+  id: string;
+  owner_user_id: string;
+  visibility: string;
+  title: string;
+  priority: string;
+  status: string;
+  current_state: string;
+  parent_task_id: string | null;
+  score: number | null;
+  evaluation_method: GtsEvaluationMethod;
+  assignee_user_id: string | null;
+  grants: GtsItemGrant[];
+}
+
+export interface GtsSkill {
+  id: string;
+  owner_user_id: string;
+  visibility: string;
+  name: string;
+  skill_ref: string;
+}
+
+export interface GtsGraphResponse {
+  configured: boolean;
+  principal?: string | null;
+  mode?: string;
+  goals: GtsGoal[];
+  tasks: GtsTask[];
+  skills: GtsSkill[];
+  task_goals: { task_id: string; goal_id: string }[];
+  task_skills: { task_id: string; skill_id: string }[];
+  assignment: { enabled: boolean; scheme: string };
+}
+
+// ── FG-15 onboarding readiness (first-run wizard) ────────────────────
+export interface OnboardingItem {
+  key: string;
+  label: string;
+  required: boolean;
+  rationale: string;
+  fix_command: string;
+  contract: string;
+  met: boolean;
+  detail: string;
+}
+
+export interface OnboardingReadinessResponse {
+  score: number;
+  score_pct: number;
+  ready_for_prod: boolean;
+  required_total: number;
+  required_met: number;
+  optional_total: number;
+  optional_met: number;
+  optional_coverage: number;
+  missing_required: string[];
+  items: OnboardingItem[];
+}
+
+// ── FG-17b agent webview (CDP) — consent-gated (C6) + traced (C8) ────
+export interface WebviewScope {
+  allowed_domains: string[];
+  mode: "read_only" | "interactive";
+}
+
+export interface WebviewPendingApproval {
+  id: string;
+  kind: string;
+  url: string | null;
+  credentialed?: boolean;
+  destructive?: boolean;
+  reason: string;
+  created_at: number;
+  resolved?: boolean | null;
+}
+
+export interface WebviewSession {
+  id: string;
+  owner_user_id: string;
+  scope: WebviewScope;
+  profile_dir?: string;
+  created_at: number;
+  trace_id: string;
+  pending: WebviewPendingApproval[];
+}
+
+export interface WebviewSessionResponse {
+  configured: boolean;
+  principal?: string | null;
+  session: WebviewSession | null;
+}
+
+export interface WebviewActionResponse {
+  decision: "allow" | "escalate" | "deny";
+  reason: string;
+  executed?: boolean;
+  detail?: string;
+  granted?: boolean;
+  approval?: WebviewPendingApproval;
 }
 
 /** Identity payload returned by ``GET /api/auth/me`` (Phase 7).
