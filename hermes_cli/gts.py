@@ -1037,7 +1037,12 @@ class GtsCentre:
             index += 1
         elif top_level_only:
             clauses.append("parent_goal_id IS NULL")
-        predicate = scope_filter(principal, start_index=index, grant_item_kind="goal")
+        predicate = scope_filter(
+            principal,
+            start_index=index,
+            grant_item_kind="goal",
+            id_column=f"{GOALS_TABLE}.id",
+        )
         clauses.append(predicate.sql)
         params.extend(predicate.params)
 
@@ -1201,7 +1206,12 @@ class GtsCentre:
         goal_id: str,
         conn: "asyncpg.Connection",
     ) -> Optional[GtsGoal]:
-        predicate = scope_filter(principal, start_index=2, grant_item_kind="goal")
+        predicate = scope_filter(
+            principal,
+            start_index=2,
+            grant_item_kind="goal",
+            id_column=f"{GOALS_TABLE}.id",
+        )
         row = await conn.fetchrow(
             f"""
             SELECT {_GOAL_COLUMNS} FROM {GOALS_TABLE}
@@ -1384,7 +1394,12 @@ class GtsCentre:
         task_id: str,
         conn: "asyncpg.Connection",
     ) -> Optional[GtsTask]:
-        predicate = scope_filter(principal, start_index=2, grant_item_kind="task")
+        predicate = scope_filter(
+            principal,
+            start_index=2,
+            grant_item_kind="task",
+            id_column=f"{TASKS_TABLE}.id",
+        )
         row = await conn.fetchrow(
             f"""
             SELECT {_TASK_COLUMNS} FROM {TASKS_TABLE}
