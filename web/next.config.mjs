@@ -17,6 +17,12 @@ const nextConfig = {
   // Lint and typecheck run as dedicated `npm run lint` / `npm run typecheck`
   // steps (and in CI); don't couple them to the production build.
   eslint: { ignoreDuringBuilds: true },
+  webpack: (config, { isServer }) => {
+    if (!isServer) {
+      config.output.publicPath = "auto";
+    }
+    return config;
+  },
 };
 
 export default nextConfig;
