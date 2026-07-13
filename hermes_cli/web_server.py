@@ -13732,6 +13732,33 @@ def _normalise_prefix(raw: Optional[str]) -> str:
     return normalise_prefix(raw)
 
 
+# Absolute asset directories baked into the built SPA (index.html tags + CSS
+# ``url(...)`` refs) that must be re-based under an ``X-Forwarded-Prefix`` so a
+# prefixed deploy fetches them through the proxy instead of the proxy host's
+# root. Covers the Vite-era public dirs AND Next's ``/_next/*`` build output.
+_PREFIXED_CSS_ASSET_DIRS = (
+    "/fonts/", "/fonts-terminal/", "/ds-assets/", "/assets/", "/_next/",
+)
+
+
+def _rewrite_css_asset_prefix(css: str, prefix: str) -> str:
+    """Re-base absolute ``url(/...)`` asset refs in a stylesheet under ``prefix``.
+
+    Browsers resolve absolute ``url(/foo)`` against the document origin, so
+    behind a ``/hermes`` path prefix an un-rewritten ``url(/_next/static/media
+    /Font.woff2)`` (or a public ``url(/fonts-terminal/...)``) would hit the
+    proxy host's root and 404. Returns ``css`` unchanged when ``prefix`` is
+    empty (root-path serving is byte-identical).
+    """
+    if not prefix:
+        return css
+    for asset_dir in _PREFIXED_CSS_ASSET_DIRS:
+        css = css.replace(f"url({asset_dir}", f"url({prefix}{asset_dir}")
+        css = css.replace(f'url("{asset_dir}', f'url("{prefix}{asset_dir}')
+        css = css.replace(f"url('{asset_dir}", f"url('{prefix}{asset_dir}")
+    return css
+
+
 def mount_spa(application: FastAPI):
     """Mount the built SPA. Falls back to index.html for client-side routing.
 
@@ -13790,14 +13817,24 @@ def mount_spa(application: FastAPI):
                 f"</script>"
             )
         if prefix:
-            # Rewrite absolute asset URLs baked into the Vite build so the
-            # browser fetches them through the same proxy prefix.
+            # Rewrite absolute asset URLs baked into the build so the browser
+            # fetches them through the same proxy prefix.
+            #
+            # Legacy Vite-era public dirs (kept for back-compat):
             html = html.replace('href="/assets/', f'href="{prefix}/assets/')
             html = html.replace('src="/assets/', f'src="{prefix}/assets/')
             html = html.replace('href="/favicon.ico"', f'href="{prefix}/favicon.ico"')
             html = html.replace('href="/fonts/', f'href="{prefix}/fonts/')
             html = html.replace('href="/ds-assets/', f'href="{prefix}/ds-assets/')
             html = html.replace('src="/ds-assets/', f'src="{prefix}/ds-assets/')
+            # Next.js entry tags + RSC flight payload reference /_next/* with an
+            # absolute path (script/link tags AND the embedded ``self.__next_f``
+            # data). Re-base every occurrence so the initial chunks/CSS load
+            # through the prefix. The webpack runtime's ``publicPath: "auto"``
+            # (see web/next.config.mjs) then derives its base from the rewritten
+            # runtime-chunk URL, so lazily-loaded chunks resolve under the
+            # prefix too — no per-prefix rebuild needed.
+            html = html.replace("/_next/", f"{prefix}/_next/")
         html = html.replace("</head>", f"{bootstrap_script}</head>", 1)
         return HTMLResponse(
             html,
@@ -13805,27 +13842,32 @@ def mount_spa(application: FastAPI):
         )
 
     # When served behind a path-prefix proxy, the built CSS contains
-    # absolute ``url(/fonts/...)`` and ``url(/ds-assets/...)`` references.
-    # Browsers resolve those against the document origin, which means
-    # under ``/hermes`` they'd hit ``mission-control.tilos.com/fonts/...``
-    # (the MC Pages app), not the Hermes backend. Intercept CSS asset
-    # requests BEFORE the StaticFiles mount and rewrite the absolute paths
-    # when a prefix is in play.
-    @application.get("/assets/{filename}.css")
-    async def serve_css(filename: str, request: Request):
-        css_path = WEB_DIST / "assets" / f"{filename}.css"
+    # absolute ``url(/fonts/...)`` / ``url(/ds-assets/...)`` (Vite-era public
+    # dirs) and ``url(/_next/static/media/...)`` (Next-bundled fonts)
+    # references. Browsers resolve those against the document origin, which
+    # means under ``/hermes`` they'd hit ``mission-control.tilos.com/fonts/...``
+    # (the MC Pages app), not the Hermes backend. Intercept CSS asset requests
+    # BEFORE the catch-all/StaticFiles mount and rewrite the absolute paths
+    # when a prefix is in play. Both the legacy ``/assets/*.css`` bundle and
+    # Next's ``/_next/static/css/*.css`` go through the same rewrite helper.
+    def _serve_css_file(css_path: Path, request: Request):
         if not css_path.is_file() or not css_path.resolve().is_relative_to(
             WEB_DIST.resolve()
         ):
             return JSONResponse({"error": "not found"}, status_code=404)
         prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
-        css = css_path.read_text(encoding="utf-8")
-        if prefix:
-            for asset_dir in ("/fonts/", "/fonts-terminal/", "/ds-assets/", "/assets/"):
-                css = css.replace(f"url({asset_dir}", f"url({prefix}{asset_dir}")
-                css = css.replace(f"url(\"{asset_dir}", f"url(\"{prefix}{asset_dir}")
-                css = css.replace(f"url('{asset_dir}", f"url('{prefix}{asset_dir}")
+        css = _rewrite_css_asset_prefix(css_path.read_text(encoding="utf-8"), prefix)
         return Response(content=css, media_type="text/css")
+
+    @application.get("/assets/{filename}.css")
+    async def serve_css(filename: str, request: Request):
+        return _serve_css_file(WEB_DIST / "assets" / f"{filename}.css", request)
+
+    @application.get("/_next/static/css/{filename}.css")
+    async def serve_next_css(filename: str, request: Request):
+        return _serve_css_file(
+            WEB_DIST / "_next" / "static" / "css" / f"{filename}.css", request
+        )
 
     application.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")
 

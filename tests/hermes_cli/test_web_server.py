@@ -6520,3 +6520,161 @@ class TestDesktopCronTicker:
 
         with self._client():
             assert not called.wait(0.5), "ticker must not run outside the desktop app"
+
+
+class TestForwardedPrefixNextAssets:
+    """Serving the Next.js dashboard behind an ``X-Forwarded-Prefix`` proxy.
+
+    FG-17a follow-up: ``_serve_index`` must re-base Next's ``/_next/*`` entry
+    tags (and the embedded RSC flight payload) with the same prefix logic
+    already applied to the Vite-era ``/assets|/fonts|/ds-assets|/favicon``
+    paths, and Next's ``/_next/static/css/*.css`` must have its absolute
+    ``url(...)`` refs rewritten too. Root-path (no-prefix) serving must stay
+    byte-identical.
+    """
+
+    def _build_next_dist(self, tmp_path: Path) -> Path:
+        """A minimal Next.js static-export layout: /_next tags + flight payload."""
+        dist = tmp_path / "web_dist"
+        (dist / "_next" / "static" / "chunks").mkdir(parents=True)
+        (dist / "_next" / "static" / "css").mkdir(parents=True)
+        (dist / "_next" / "static" / "media").mkdir(parents=True)
+        # mount_spa mounts StaticFiles at /assets, which requires the dir.
+        (dist / "assets").mkdir(parents=True)
+
+        # index.html mirrors what `next build && export` emits: absolute
+        # /_next/* in <script>/<link> tags AND inside the self.__next_f RSC
+        # payload (as escaped JSON string literals).
+        (dist / "index.html").write_text(
+            "<!DOCTYPE html><html><head>"
+            '<link rel="stylesheet" href="/_next/static/css/app.css"/>'
+            '<link rel="preload" as="script" href="/_next/static/chunks/webpack.js"/>'
+            '<script src="/_next/static/chunks/main.js" async=""></script>'
+            '<link rel="icon" href="/favicon.ico"/>'
+            "</head><body><div id=\"root\"></div>"
+            '<script src="/_next/static/chunks/webpack.js" async=""></script>'
+            '<script>self.__next_f.push([1,"HL[\\"/_next/static/css/app.css\\",\\"style\\"]"])</script>'
+            "</body></html>",
+            encoding="utf-8",
+        )
+        (dist / "_next" / "static" / "chunks" / "webpack.js").write_text(
+            "/*webpack runtime*/", encoding="utf-8"
+        )
+        (dist / "_next" / "static" / "chunks" / "main.js").write_text(
+            "/*main*/", encoding="utf-8"
+        )
+        # Next-bundled font (absolute /_next) + public asset (absolute /fonts-terminal).
+        (dist / "_next" / "static" / "css" / "app.css").write_text(
+            "@font-face{src:url(/_next/static/media/Mondwest.woff2)}"
+            ".t{background:url(/fonts-terminal/JetBrainsMono.woff2)}",
+            encoding="utf-8",
+        )
+        return dist
+
+    def _client(self, monkeypatch, dist: Path):
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws, "WEB_DIST", dist)
+        spa_app = FastAPI()
+        ws.mount_spa(spa_app)
+        return TestClient(spa_app)
+
+    def test_root_path_serves_next_tags_unchanged(self, monkeypatch, tmp_path):
+        dist = self._build_next_dist(tmp_path)
+        client = self._client(monkeypatch, dist)
+
+        resp = client.get("/")
+        assert resp.status_code == 200
+        # No prefix → /_next/* tags stay absolute-from-root, nothing rebased.
+        assert 'src="/_next/static/chunks/main.js"' in resp.text
+        assert 'href="/_next/static/css/app.css"' in resp.text
+        assert "/hermes/_next/" not in resp.text
+        # Base path stays empty at root.
+        assert 'window.__HERMES_BASE_PATH__=""' in resp.text
+
+    def test_prefixed_index_rewrites_next_tags_and_flight_payload(
+        self, monkeypatch, tmp_path
+    ):
+        dist = self._build_next_dist(tmp_path)
+        client = self._client(monkeypatch, dist)
+
+        resp = client.get("/", headers={"x-forwarded-prefix": "/hermes"})
+        assert resp.status_code == 200
+        # Every /_next/* reference — script src, preload/stylesheet href, and
+        # the embedded RSC flight payload — is rebased under the prefix.
+        assert 'src="/hermes/_next/static/chunks/main.js"' in resp.text
+        assert 'href="/hermes/_next/static/css/app.css"' in resp.text
+        assert "/hermes/_next/static/chunks/webpack.js" in resp.text
+        assert "/hermes/_next/static/css/app.css" in resp.text  # flight payload
+        # No bare /_next/ path survives (would 404 through the proxy).
+        assert 'src="/_next/' not in resp.text
+        assert 'href="/_next/' not in resp.text
+        assert '\\"/_next/' not in resp.text
+        # Favicon still rebased (existing behavior preserved).
+        assert 'href="/hermes/favicon.ico"' in resp.text
+        # Runtime base path injected for the SPA's own /api + WS URLs.
+        assert 'window.__HERMES_BASE_PATH__="/hermes"' in resp.text
+
+    def test_next_static_chunk_served_at_root_and_under_stripped_prefix(
+        self, monkeypatch, tmp_path
+    ):
+        # A reverse proxy strips the prefix before forwarding, so the backend
+        # sees /_next/... either way. Both must serve the chunk so the browser's
+        # `<prefix>/_next/...` request (webpack publicPath="auto") resolves.
+        dist = self._build_next_dist(tmp_path)
+        client = self._client(monkeypatch, dist)
+
+        r1 = client.get("/_next/static/chunks/main.js")
+        assert r1.status_code == 200 and "/*main*/" in r1.text
+        r2 = client.get(
+            "/_next/static/chunks/main.js", headers={"x-forwarded-prefix": "/hermes"}
+        )
+        assert r2.status_code == 200 and "/*main*/" in r2.text
+
+    def test_root_next_css_is_byte_identical(self, monkeypatch, tmp_path):
+        dist = self._build_next_dist(tmp_path)
+        client = self._client(monkeypatch, dist)
+
+        raw = (dist / "_next" / "static" / "css" / "app.css").read_text()
+        resp = client.get("/_next/static/css/app.css")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/css")
+        assert resp.text == raw  # no rewriting at root
+
+    def test_prefixed_next_css_rewrites_absolute_urls(self, monkeypatch, tmp_path):
+        dist = self._build_next_dist(tmp_path)
+        client = self._client(monkeypatch, dist)
+
+        resp = client.get(
+            "/_next/static/css/app.css", headers={"x-forwarded-prefix": "/hermes"}
+        )
+        assert resp.status_code == 200
+        # Both the Next-bundled font (/_next/static/media) and the public
+        # /fonts-terminal asset are rebased under the prefix.
+        assert "url(/hermes/_next/static/media/Mondwest.woff2)" in resp.text
+        assert "url(/hermes/fonts-terminal/JetBrainsMono.woff2)" in resp.text
+        assert "url(/_next/static/media/" not in resp.text
+        assert "url(/fonts-terminal/" not in resp.text
+
+    def test_next_css_path_traversal_blocked(self, monkeypatch, tmp_path):
+        dist = self._build_next_dist(tmp_path)
+        client = self._client(monkeypatch, dist)
+
+        resp = client.get("/_next/static/css/nonexistent.css")
+        assert resp.status_code == 404
+
+    def test_next_config_uses_auto_public_path(self):
+        """Frontend build-config contract for runtime chunk loading.
+
+        With ``output.publicPath = "auto"``, the webpack runtime derives its
+        base from the (prefix-rewritten) runtime-chunk URL, so lazily-loaded
+        ``/_next/*`` chunks resolve under the proxy prefix without a per-prefix
+        rebuild. Without it, the runtime hardcodes an absolute ``/_next/`` base
+        and prefixed chunk loads 404. Guards the fix from silent regression.
+        """
+        from hermes_cli.web_server import PROJECT_ROOT
+
+        config = (PROJECT_ROOT / "web" / "next.config.mjs").read_text()
+        assert 'publicPath = "auto"' in config
