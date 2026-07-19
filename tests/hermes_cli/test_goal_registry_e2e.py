@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 import asyncpg
 import pytest
 
+from hermes_cli import goal_registry
 from hermes_cli.access import Principal, Role, bind_principal, private
 from hermes_cli.datastore import get_store
 from hermes_cli.goal_monitor import (
@@ -240,10 +241,16 @@ async def test_measurement_loop_end_to_end(postgres_dsn: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stale_metric_is_solicited_but_quiet_hours_blocks(postgres_dsn: str) -> None:
+async def test_stale_metric_is_solicited_but_quiet_hours_blocks(
+    postgres_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = await _fresh_store(postgres_dsn)
     alice = _principal("alice")
     goal = await store.create_goal(alice, "Weekly review")
+    # Pin the measurement clock so ``last_measured_at`` is anchored to NOON
+    # rather than the real wall clock; otherwise staleness (below) depends on
+    # how far the current date has drifted past NOON.
+    monkeypatch.setattr(goal_registry, "_utcnow", lambda: NOON)
     await store.add_metric(
         alice, goal.id, GoalMetric("reviews", target=1, current=1, cadence="1h")
     )
