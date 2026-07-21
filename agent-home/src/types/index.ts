@@ -158,6 +158,95 @@ export interface TraceRow {
   mode: string;
 }
 
+/**
+ * A C8 trace summary row (mirror of `interactions.TraceSummary.as_dict`): one
+ * conversation/trace rolled up to its span, event count, and per-kind counts.
+ */
+export interface TraceSummary {
+  trace_id: string;
+  first_ts: string;
+  last_ts: string;
+  actor_user_id: string | null;
+  session_key: string | null;
+  platform: string | null;
+  mode: string;
+  event_count: number;
+  kind_counts: Record<string, number>;
+  rolled_up: boolean;
+}
+
+/** The C2-scoped list of C8 traces from `/api/comms/traces`. */
+export interface TracesResponse {
+  configured: boolean;
+  principal?: string | null;
+  traces: TraceSummary[];
+}
+
+/**
+ * One trace's timeline projection from `/api/comms/traces/{id}`: the ordered
+ * interaction events plus the rolled-up summary (null while still live).
+ */
+export interface TraceDetailResponse {
+  configured: boolean;
+  principal?: string | null;
+  trace_id: string;
+  interactions: TraceRow[];
+  rollup: TraceSummary | null;
+}
+
+/**
+ * A FG-12 change-log row (mirror of the `/api/comms/changes` payload): an
+ * agent/human mutation the principal may review, and whether it's reversible.
+ */
+export interface Change {
+  id: string;
+  actor_user_id: string | null;
+  mode: string;
+  target_kind: string;
+  reversible: boolean;
+  visibility: string;
+  undone: boolean;
+}
+
+/** The C2-scoped FG-12 change log from `/api/comms/changes`. */
+export interface ChangesResponse {
+  configured: boolean;
+  principal?: string | null;
+  changes: Change[];
+}
+
+/**
+ * A durable Core-write denial (mirror of a `core_audit_log` line): an agent
+ * write refused at the C7 boundary. Surfaced by the Core-area view.
+ */
+export interface CoreDenial {
+  id: string;
+  ts: number;
+  actor_user_id: string;
+  mode: string;
+  summary: string;
+  op?: { kind?: string; op?: string; path?: string; matched_glob?: string };
+}
+
+/**
+ * The FG-14 C7 Core-boundary projection from `/api/core/manifest` (read-only):
+ * the active `core_manifest.yaml` globs, boundary health (`fallback_active`
+ * means it's running on the baked-in fail-closed set), and a tail of the
+ * durable Core-denial audit log. Core is immutable to the runtime agent.
+ */
+export interface CoreManifestResponse {
+  core_root: string;
+  manifest_path: string;
+  manifest_present: boolean;
+  manifest_parseable: boolean;
+  fallback_active: boolean;
+  self_protected: boolean;
+  globs: string[];
+  glob_count: number;
+  audit_log_path: string;
+  denials: CoreDenial[];
+}
+
 /** A tool-registry listing entry (FG-07). Minimal; extend as Wave B3 lands. */
 export interface Tool {
   ref: string;
