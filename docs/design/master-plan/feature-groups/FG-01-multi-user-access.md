@@ -1,6 +1,6 @@
 # FG-01 — Multi-users with access rights; single transferable owner
 
-**Wave:** 0 (foundation) · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** 0 (foundation) · **Owner agent:** _unassigned_ · **Status:** Implemented (C1/C2 `hermes_cli/access.py`) — merged to `develop` (PR #12); ECS system-test + prod promotion remain owner-gated
 
 ## Summary
 Turn the single-owner personal agent into a **multi-user** system with **access

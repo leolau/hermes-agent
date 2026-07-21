@@ -1,6 +1,6 @@
 # FG-06 — Task discovery & progress tracking
 
-**Wave:** 1 · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** 1 · **Owner agent:** _unassigned_ · **Status:** Implemented (code + tests green) — merged to `develop` (PR #18); ECS system-test + prod promotion remain owner-gated
 
 ## Summary
 Track **explicit tasks** (given by a user/agent) AND **autonomously discover

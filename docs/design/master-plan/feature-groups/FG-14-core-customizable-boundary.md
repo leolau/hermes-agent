@@ -1,6 +1,6 @@
 # FG-14 — Core vs Customizable boundary + protection
 
-**Wave:** A (Phase-2 foundation) · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** A (Phase-2 foundation) · **Owner agent:** _unassigned_ · **Status:** Implemented (C7 Core write-guard `agent/core_boundary.py` + `core_manifest.yaml`) — merged to `develop` (PR #27); ECS system-test remains owner-gated
 
 ## Summary
 Split the system into two explicit areas — **Core** (fixed system machinery) and
