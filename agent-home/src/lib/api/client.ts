@@ -20,7 +20,10 @@ import type {
   CoreManifestResponse,
   GtsGraphResponse,
   Notification,
+  OnboardingReadinessResponse,
   Principal,
+  StoreMode,
+  ToolsResponse,
   TraceDetailResponse,
   TracesResponse,
 } from "@/types";
@@ -140,6 +143,23 @@ export class HermesApiClient {
   /** The C2-scoped FG-12 change log (read-only in this surface). */
   async changes(): Promise<ChangesResponse> {
     return this.request("/api/comms/changes");
+  }
+
+  /**
+   * The FG-15 onboarding readiness (read-only): the CLI's setup schema +
+   * `ready_for_prod` gate. Reports secret *presence* only, never values.
+   */
+  async onboardingReadiness(): Promise<OnboardingReadinessResponse> {
+    return this.request("/api/onboarding/readiness");
+  }
+
+  /**
+   * The FG-07 tool registry for a datastore mode (read-only in this surface).
+   * Enable/config/promote stay on the operator authority paths.
+   */
+  async tools(mode?: StoreMode): Promise<ToolsResponse> {
+    const qs = mode ? `?mode=${encodeURIComponent(mode)}` : "";
+    return this.request(`/api/tools${qs}`);
   }
 
   /** List pending comms/notifications visible to the principal (C2-scoped). */

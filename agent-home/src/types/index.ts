@@ -247,12 +247,70 @@ export interface CoreManifestResponse {
   denials: CoreDenial[];
 }
 
-/** A tool-registry listing entry (FG-07). Minimal; extend as Wave B3 lands. */
+/**
+ * A single FG-15 onboarding-readiness check (mirror of the CLI setup schema):
+ * whether a required/optional prerequisite is `met`, why it matters, and the
+ * `hermes …` fix command. Reports secret *presence* only, never values.
+ */
+export interface OnboardingItem {
+  key: string;
+  label: string;
+  required: boolean;
+  rationale: string;
+  fix_command: string;
+  contract: string;
+  met: boolean;
+  detail: string;
+}
+
+/**
+ * The FG-15 onboarding readiness from `/api/onboarding/readiness`: the overall
+ * score + `ready_for_prod` gate the CLI computes, plus the per-item checks.
+ */
+export interface OnboardingReadinessResponse {
+  score: number;
+  score_pct: number;
+  ready_for_prod: boolean;
+  required_total: number;
+  required_met: number;
+  optional_total: number;
+  optional_met: number;
+  optional_coverage: number;
+  missing_required: string[];
+  items: OnboardingItem[];
+}
+
+/** A registry tool's provenance kind (mirror of the Python tools registry). */
+export type ToolKind = "in_house" | "remote" | "builtin";
+/** A registry tool's enable status. */
+export type ToolStatus = "enabled" | "disabled";
+
+/**
+ * A FG-07 tool-registry entry (mirror of `tools_registry.Tool.as_dict`): a
+ * tool the operator may enable/promote. This surface is read-only in
+ * `agent-home` — enable/config/promote stay on the operator authority paths.
+ */
 export interface Tool {
-  ref: string;
+  id: string;
   name: string;
-  enabled: boolean;
+  kind: ToolKind;
+  stack: string;
+  owner_user_id: string;
+  visibility: string;
   mode: StoreMode;
+  status: ToolStatus;
+  enabled: boolean;
+  mcp_endpoint_ref: string | null;
+  web_url: string | null;
+  config_json: Record<string, unknown>;
+}
+
+/** The C2-scoped tool registry from `/api/tools` for a datastore mode. */
+export interface ToolsResponse {
+  configured: boolean;
+  mode: StoreMode;
+  tools: Tool[];
+  detail?: string;
 }
 
 /** A comms/notification item (FG-10). Minimal; extend as Wave C3 lands. */
