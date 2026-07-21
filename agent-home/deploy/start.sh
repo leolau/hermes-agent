@@ -16,4 +16,6 @@ if ! command -v npm >/dev/null 2>&1; then
   done
 fi
 
-exec npm run start -- -H 127.0.0.1 -p "${PORT:-3000}"
+# PORT comes from the systemd EnvironmentFile (agent-home.env). Default 3100
+# because :3000 on the prod box is the WhatsApp bridge.
+exec npm run start -- -H 127.0.0.1 -p "${PORT:-3100}"
