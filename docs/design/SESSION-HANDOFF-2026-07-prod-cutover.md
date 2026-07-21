@@ -1,4 +1,4 @@
-# Session Hand-off — ai-prentice production cutover (2026-07)
+# Session Hand-off — ai-prentice-4-all production cutover (2026-07)
 
 > **Purpose:** let the next agent (or human) pick up development without re-deriving
 > the live-infra state. This note is **operational** — the design source of truth
@@ -6,7 +6,7 @@
 > contracts C1–C9, FG index, gates, append-only §9 changelog). This file records
 > **what is deployed right now**, how to reach it, and the known follow-ups.
 >
-> Author: devin:3c64bcf2 (for Leo). Product name: **ai-prentice** (built on Hermes).
+> Author: devin:3c64bcf2 (for Leo). Product name: **ai-prentice-4-all** (built on Hermes).
 
 ---
 

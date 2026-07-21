@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # LLM provider secrets — presence of ANY satisfies the required item. DeepSeek
-# leads (the ai-prentice deployment's default provider). Mirrors the provider
+# leads (the ai-prentice-4-all deployment's default provider). Mirrors the provider
 # keys ``hermes status`` already surfaces; NOT a new env var.
 LLM_PROVIDER_SECRET_ENV_VARS: tuple[str, ...] = (
     "DEEPSEEK_API_KEY",
