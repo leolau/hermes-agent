@@ -15,7 +15,18 @@
 import "server-only";
 
 import { hermesApiBaseUrl } from "@/lib/env";
-import type { GtsGraphResponse, Notification, Principal } from "@/types";
+import type {
+  ChangesResponse,
+  CoreManifestResponse,
+  GtsGraphResponse,
+  Notification,
+  OnboardingReadinessResponse,
+  Principal,
+  StoreMode,
+  ToolsResponse,
+  TraceDetailResponse,
+  TracesResponse,
+} from "@/types";
 
 /** Raised when the Python API returns a non-2xx status. */
 export class HermesApiError extends Error {
@@ -104,6 +115,51 @@ export class HermesApiClient {
    */
   async gtsGraph(): Promise<GtsGraphResponse> {
     return this.request("/api/gts/graph");
+  }
+
+  /**
+   * The FG-14 C7 Core-boundary projection (read-only): active manifest globs,
+   * boundary health, and the tail of the Core-denial audit log. Core is
+   * immutable to the runtime agent, so this only reflects the boundary.
+   */
+  async coreManifest(limit = 50): Promise<CoreManifestResponse> {
+    return this.request(`/api/core/manifest?limit=${encodeURIComponent(limit)}`);
+  }
+
+  /**
+   * The C2-scoped list of C8 interaction traces (read-only). Scoping is
+   * enforced upstream by the Python ledger; the browser never sees traces the
+   * principal may not.
+   */
+  async traces(limit = 50): Promise<TracesResponse> {
+    return this.request(`/api/comms/traces?limit=${encodeURIComponent(limit)}`);
+  }
+
+  /** One trace's C2-scoped interaction timeline + rollup (read-only). */
+  async trace(traceId: string): Promise<TraceDetailResponse> {
+    return this.request(`/api/comms/traces/${encodeURIComponent(traceId)}`);
+  }
+
+  /** The C2-scoped FG-12 change log (read-only in this surface). */
+  async changes(): Promise<ChangesResponse> {
+    return this.request("/api/comms/changes");
+  }
+
+  /**
+   * The FG-15 onboarding readiness (read-only): the CLI's setup schema +
+   * `ready_for_prod` gate. Reports secret *presence* only, never values.
+   */
+  async onboardingReadiness(): Promise<OnboardingReadinessResponse> {
+    return this.request("/api/onboarding/readiness");
+  }
+
+  /**
+   * The FG-07 tool registry for a datastore mode (read-only in this surface).
+   * Enable/config/promote stay on the operator authority paths.
+   */
+  async tools(mode?: StoreMode): Promise<ToolsResponse> {
+    const qs = mode ? `?mode=${encodeURIComponent(mode)}` : "";
+    return this.request(`/api/tools${qs}`);
   }
 
   /** List pending comms/notifications visible to the principal (C2-scoped). */

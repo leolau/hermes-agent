@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { LogoutButton } from "@/components/LogoutButton";
 import { MobileShell } from "@/components/MobileShell";
 import { requirePrincipal } from "@/lib/auth/principal";
@@ -94,6 +96,56 @@ export default async function HomePage() {
           never sees rows it may not.
         </p>
       </section>
+
+      <nav data-component="HomeLinks" className="mt-4 flex flex-col gap-2">
+        <Link
+          href="/onboarding"
+          data-component="OnboardingLink"
+          className="flex items-center justify-between rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 active:opacity-70"
+        >
+          <span>
+            <span className="block text-sm font-medium">Getting started</span>
+            <span className="block text-xs text-[var(--color-muted)]">
+              FG-15 setup readiness (read-only)
+            </span>
+          </span>
+          <span aria-hidden className="text-[var(--color-muted)]">
+            ›
+          </span>
+        </Link>
+
+        <Link
+          href="/tools"
+          data-component="ToolsLink"
+          className="flex items-center justify-between rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 active:opacity-70"
+        >
+          <span>
+            <span className="block text-sm font-medium">Tools</span>
+            <span className="block text-xs text-[var(--color-muted)]">
+              FG-07 tool registry (read-only)
+            </span>
+          </span>
+          <span aria-hidden className="text-[var(--color-muted)]">
+            ›
+          </span>
+        </Link>
+
+        <Link
+          href="/core"
+          data-component="CoreAreaLink"
+          className="flex items-center justify-between rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 active:opacity-70"
+        >
+          <span>
+            <span className="block text-sm font-medium">Core area</span>
+            <span className="block text-xs text-[var(--color-muted)]">
+              C7 boundary · change log · denials (read-only)
+            </span>
+          </span>
+          <span aria-hidden className="text-[var(--color-muted)]">
+            ›
+          </span>
+        </Link>
+      </nav>
 
       <LogoutButton />
     </MobileShell>
