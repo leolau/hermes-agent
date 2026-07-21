@@ -156,7 +156,7 @@ system test green** (owner-gated).
 - [x] Owner confirms Open-decisions §1–4 (Leo, 2026-07-11: bridge-C1 auth, on-box Caddy, coexist `web/`, `agent-home/` at root)
 - [x] Wave A1: `agent-home` Next.js skeleton (App Router, Tailwind, mobile shell + bottom-nav, PWA, `supabase-js`, `data-component`, build/CI, on-box Caddy route)
 - [x] Wave A2: auth + data-access foundation (C1 principal bridge → server-side Supabase RLS context; typed Python-API client; shared types) — **published as a small interface PR first**
-- [ ] Wave B1: GTS Centre (graph, scores, assignment + watchers)
+- [x] Wave B1: GTS Centre (graph, scores, assignment + watchers) — read-only mobile view over `/api/gts/graph` (assignment writes deferred: no HTTP write API exists — creation/scoring/assignment stay on the CLI/agent authority paths)
 - [ ] Wave B2: Core-area view + interaction-trace timeline
 - [ ] Wave B3: onboarding wizard + readiness + tools registry
 - [ ] Wave C1: agent chat pane (one-brain via API) + Supabase Storage attachments/media
@@ -171,6 +171,7 @@ system test green** (owner-gated).
 | 2026-07-11 | 1 | devin:8cec0d47 (for Leo) | Created FG doc (PLAN) | Leo: build a new mobile-first Next.js `agent-home` on the fixed three-tier stack (Next.js + Python AI layer + Supabase) and move all Phase-2 features into it; existing `web/` is not mobile-friendly. |
 | 2026-07-11 | 2 | devin:8cec0d47 (for Leo) | Locked the 4 open decisions (owner-confirmed) | Leo confirmed: (1) bridge C1 principal → server-side Supabase RLS context (GoTrue browser-direct deferred), (2) deploy on-box behind Caddy, (3) coexist — `web/` stays the operator/admin console (option A), (4) `agent-home/` at repo root. Plan is now actionable; Wave A next. |
 | 2026-07-21 | 3 | devin:a7a37d33 (for Leo) | **Wave A landed** — `agent-home/` skeleton + auth/data-access seam (A1+A2). See "Seam API surface (Wave A2)" below. | Foundation all later waves consume: mobile-first Next.js 15 App-Router shell (bottom-nav, safe-area, PWA install + offline shell, `data-component` babel plugin) + the BFF seam (C1 principal bridge → server-side Supabase RLS context → typed Python-API client → shared types → RLS-scoped Realtime stub). `web/` untouched; zero new core tools; zero new non-secret `HERMES_*` env vars. |
+| 2026-07-21 | 4 | devin:a7a37d33 (for Leo) | **Wave B1 landed** — mobile-first GTS Centre at `/graph` (read-only, C9). | First real feature panel: the `/graph` tab is now a BFF server component that resolves the principal, calls the Python API `GET /api/gts/graph` (C2 + FG-19 `item_grants` RLS enforced upstream), and renders the goal→task→skill hierarchy — engine-computed 0–100 scores, per-node observe/measure evaluation method (never a user-set score), and FG-19 assignment (assignee + read-only watcher count). New: `HermesApiClient.gtsGraph()`; shared types `GtsObservation`, `GtsEvaluationMethod`, `GtsItemGrant`, `GtsSkill`, `GtsGraphResponse` (and `evaluation_method` + `grants` added to `GtsGoal`/`GtsTask`); component `components/gts/GtsCentreView`. Mirrors `web/`'s `GtsCentrePage` as functional reference; the GTS authority logic is **not** re-implemented in TS. **Deviation:** assignment/accept/decline/eval-method **writes are deferred** — no HTTP write API exists (creation/scoring/assignment stay on the CLI/agent authority paths, and `web/`'s panel is likewise read-only), so Wave B1 ships the read surface only. `web/` untouched; zero new core tools / non-secret `HERMES_*` vars; no new Python. |
 
 ### Seam API surface (Wave A2) — for Wave B/C consumers
 
@@ -196,16 +197,16 @@ Everything below is server-side (BFF) unless marked client. Import paths are rel
 **RLS mirror** (`lib/supabase/rls.ts`): `GUC_PRINCIPAL_ID`, `GUC_PRINCIPAL_ROLE`, `scopeReadPolicySql(table): string`.
 
 **Typed Python-API client** (`lib/api/client.ts`)
-- `class HermesApiClient` — `new HermesApiClient({ hermesToken?, baseUrl? })`; methods `request<T>(path, init?)`, `whoami()`, `authProviders()`, `notifications()`. Replays the bridged token as the `hermes_session_at` cookie + bearer header.
+- `class HermesApiClient` — `new HermesApiClient({ hermesToken?, baseUrl? })`; methods `request<T>(path, init?)`, `whoami()`, `authProviders()`, `gtsGraph()` (Wave B1: `GET /api/gts/graph` → `GtsGraphResponse`), `notifications()`. Replays the bridged token as the `hermes_session_at` cookie + bearer header.
 - `class HermesApiError extends Error` (`status`, `body`).
 
 **RLS-scoped Realtime — stub** (`lib/supabase/realtime.ts`, client): `createRealtimeClient(config)`, `subscribeScoped<Row>(client, opts): () => void`, `realtimeEnabled(): boolean` (false until browser-direct GoTrue lands).
 
-**Shared types** (`types/index.ts`): `Role`, `Principal`, `StoreMode`, `Visibility`, `GtsGoal`, `GtsTask`, `GtsNode`, `InteractionKind`, `TraceRow`, `Tool`, `Notification`.
+**Shared types** (`types/index.ts`): `Role`, `Principal`, `StoreMode`, `Visibility`, `GtsGoal`, `GtsTask`, `GtsNode`, `GtsObservation`, `GtsEvaluationMethod`, `GtsItemGrant`, `GtsSkill`, `GtsGraphResponse` (Wave B1), `InteractionKind`, `TraceRow`, `Tool`, `Notification`.
 
 **Env (secrets in `.env`, deploy-topology `AGENT_HOME_*`):** `AGENT_HOME_SESSION_SECRET`, `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `AGENT_HOME_API_URL` (default `http://127.0.0.1:9119`), `AGENT_HOME_DATASTORE_MODE` (`dev`/`prod`). Zero new non-secret `HERMES_*` vars.
 
-**Routes:** `/login` (bridge login) · `/` (seam proof: principal + one RLS-scoped read) · `/graph` `/chat` `/activity` (tab placeholders) · `POST /api/session/login` · `POST /api/session/logout`.
+**Routes:** `/login` (bridge login) · `/` (seam proof: principal + one RLS-scoped read) · `/graph` (Wave B1: read-only GTS Centre) · `/chat` `/activity` (tab placeholders) · `POST /api/session/login` · `POST /api/session/logout`.
 
 **Deploy:** on-box behind Caddy — see `agent-home/README.md` (Caddyfile snippet + subdomain plan). Owner-gated; not deployed.
 

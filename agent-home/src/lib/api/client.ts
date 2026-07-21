@@ -15,7 +15,7 @@
 import "server-only";
 
 import { hermesApiBaseUrl } from "@/lib/env";
-import type { Notification, Principal } from "@/types";
+import type { GtsGraphResponse, Notification, Principal } from "@/types";
 
 /** Raised when the Python API returns a non-2xx status. */
 export class HermesApiError extends Error {
@@ -95,6 +95,15 @@ export class HermesApiClient {
     providers: { name: string; display_name: string; supports_password: boolean }[];
   }> {
     return this.request("/api/auth/providers");
+  }
+
+  /**
+   * The FG-18 GTS Centre graph (C9) scoped to the principal (C2 + item_grants
+   * RLS, enforced server-side in the Python layer). Read-only: creation and
+   * scoring stay on the CLI/agent authority paths, so there is no write here.
+   */
+  async gtsGraph(): Promise<GtsGraphResponse> {
+    return this.request("/api/gts/graph");
   }
 
   /** List pending comms/notifications visible to the principal (C2-scoped). */

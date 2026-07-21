@@ -33,7 +33,40 @@ export type StoreMode = "dev" | "prod";
 /** Visibility tag on every scoped row: `shared` or `private:<user_id>`. */
 export type Visibility = "shared" | `private:${string}`;
 
-/** A GTS goal node (mirror of `gts.GtsGoal.as_dict`). */
+/**
+ * How a node's progress is observed/scored (mirror of
+ * `gts` evaluation-method dict). The score itself is always engine-computed;
+ * this is the user-owned observe/measure definition, never the score.
+ */
+export interface GtsObservation {
+  source: string;
+  prompt: string;
+  ref?: Record<string, unknown>;
+}
+
+export interface GtsEvaluationMethod {
+  set_by_user_id: string | null;
+  locked: boolean;
+  measurable: boolean;
+  observation: GtsObservation | null;
+  scoring_prompt: string;
+}
+
+/**
+ * A FG-19 per-item grant attached to a node: the single `assignee` plus any
+ * read-only `watcher`s. A grant only confers access while `pending`/`accepted`.
+ */
+export interface GtsItemGrant {
+  id: string;
+  item_kind: string;
+  item_id: string;
+  user_id: string;
+  grant: "assignee" | "watcher" | string;
+  granted_by: string;
+  status: string;
+}
+
+/** A GTS goal node (mirror of `gts.GtsGoal.as_dict` + graph enrichment). */
 export interface GtsGoal {
   id: string;
   owner_user_id: string;
@@ -45,9 +78,11 @@ export interface GtsGoal {
   parent_goal_id: string | null;
   score: number | null;
   assignee_user_id: string | null;
+  evaluation_method: GtsEvaluationMethod;
+  grants: GtsItemGrant[];
 }
 
-/** A GTS task node (mirror of `gts.GtsTask.as_dict`). */
+/** A GTS task node (mirror of `gts.GtsTask.as_dict` + graph enrichment). */
 export interface GtsTask {
   id: string;
   owner_user_id: string;
@@ -59,12 +94,40 @@ export interface GtsTask {
   parent_task_id: string | null;
   score: number | null;
   assignee_user_id: string | null;
+  evaluation_method: GtsEvaluationMethod;
+  grants: GtsItemGrant[];
+}
+
+/** A GTS skill node (mirror of `gts` skill dict). */
+export interface GtsSkill {
+  id: string;
+  owner_user_id: string;
+  visibility: string;
+  name: string;
+  skill_ref: string;
 }
 
 /** Either kind of GTS graph node. */
 export type GtsNode =
   | ({ kind: "goal" } & GtsGoal)
   | ({ kind: "task" } & GtsTask);
+
+/**
+ * The full C2-scoped GTS graph the Python API returns from `/api/gts/graph`:
+ * goal→task→skill hierarchy with the M:N edges, engine-computed scores, and
+ * FG-19 assignment. `configured: false` when the app datastore is unset.
+ */
+export interface GtsGraphResponse {
+  configured: boolean;
+  principal?: string | null;
+  mode?: string;
+  goals: GtsGoal[];
+  tasks: GtsTask[];
+  skills: GtsSkill[];
+  task_goals: { task_id: string; goal_id: string }[];
+  task_skills: { task_id: string; skill_id: string }[];
+  assignment: { enabled: boolean; scheme: string };
+}
 
 /** The C8 interaction/trace kinds (mirror of `interactions.InteractionKind`). */
 export type InteractionKind =
