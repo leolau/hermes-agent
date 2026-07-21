@@ -65,6 +65,12 @@
 | D14 | **GTS Centre is a Core tool** unifying goals/tasks/skills; its implementation + governing rules are immutable to user/agent (only data is mutable, within its authority rules). | Extends FG-04 goals + FG-06 tasks + skills (no new store): **M:N** task↔goals & skill↔tasks, **hierarchical** goals/tasks with priorities, **user-only** top-level goals + evaluation methods, **agent** sub-goals/tasks, **auto-computed score 0–100** with priority-weighted rollup. Publishes **C9**. (FG-18) |
 | D15 | **GTS is per-user isolated; owner sees all; cross-user assignment is a per-item grant (single assignee + optional watchers).** | An assigned item stays private to its creator but the assignee gets scoped access to *that item only* (no leak of the owner's other private GTS). Extends C2 with per-row grants + RLS; top-level goals not assignable; assignee can advance progress but not change eval method/reassign/delete; full C5/C8 audit. (FG-19) |
 
+### Phase-3 locked decisions (from Leo, 2026-07-11)
+
+| # | Decision | Consequence |
+|---|----------|-------------|
+| D16 | **`agent-home` — a new, mobile-first Next.js app — becomes the user-facing face; the system is a fixed three-tier stack: Next.js UI + Python AI layer (API) + Supabase (storage/DB).** All Phase-2 features move into it; the existing `web/` becomes the operator/admin console. | New `agent-home/` (App Router, mobile-first, PWA) via a **BFF pattern**: the `agent-home` server holds the C1 principal context, proxies agent/authority ops to the Python `/api/*` (one-brain chat, CDP webview, GTS authority, readiness, Core manifest, tool promote), and does **server-side** Supabase reads with the principal's RLS context (+ RLS-scoped Realtime). Browser never gets a privileged Supabase key or bypasses C1/C2/C6/C8. `agent-home` is **Core (C7)**. No new contract — a new surface over C1/C2/C3/C5/C6/C7/C8/C9. (FG-20) |
+
 Cost context (see chat): current 2/4 box ≈ **$36/mo**; target 4/16 ≈ **$137/mo + ~$15 disk**; 8/32 ≈ **$266–317/mo**.
 
 ---
@@ -127,6 +133,12 @@ Every FG must obey these or it will not merge:
 | [18](./feature-groups/FG-18-gts-centre.md) | GTS Centre (Goals→Tasks→Skills), a Core tool (C9) | **B** | `goal_registry.py`+`goals.py` (FG-04), `tasks`/kanban/todo (FG-06), skills |
 | [17](./feature-groups/FG-17-dashboard-nextjs-face.md) | Dashboard = the face → Next.js + embedded Telegram + agent webview | **B→C** | `web/` (port Vite→Next.js), `web_server.py`/`/api/*`, `dashboard_auth`, CDP browser, FG-07 |
 | [19](./feature-groups/FG-19-gts-per-user-isolation-assignment.md) | Per-user GTS isolation + cross-user assignment | **C** | FG-18 C9, C2 `can_read`/`scope_filter`+RLS, FG-10 (C6) |
+
+### Phase 3 — FG-20 (mobile-first `agent-home`)
+
+| FG | Title | Wave | Primary reuse anchors |
+|----|-------|------|-----------------------|
+| [20](./feature-groups/FG-20-agent-home-nextjs-supabase.md) | `agent-home` — mobile-first Next.js face (Next.js UI + Python AI layer + Supabase) | **A→B→C** (Phase-3) | Python `/api/*` (AI layer), Supabase (`app_*` + Storage), `access.py`/`interactions.py`/`gts.py` (C1/C2/C8/C9), `web/` panels as functional reference, `data-component` plugin |
 
 ---
 
@@ -209,6 +221,36 @@ FG-18/16/14 land. As in Wave 0, **publish the new contracts (C7/C8/C9) as small
 interface PRs first** so Wave-B/C agents don't collide on the god-files. Each
 agent works on its own branch, edits only its FG doc, keeps baseline green, and
 re-runs the affected system-test checklists (FG-17 must re-run FG-07/10).
+
+### Phase 3 (FG-20 `agent-home`) — waves (start after Phase-2 `develop` is merged + owner confirms FG-20 open decisions)
+
+```
+WAVE A (Phase-3 foundations — parallel; publish the data/auth seam first)
+  ├─ FG-20/A1  agent-home Next.js skeleton      (App Router, Tailwind, mobile shell + bottom-nav,
+  │            PWA, supabase-js, data-component, build/CI, on-box Caddy route)
+  └─ FG-20/A2  auth + data-access foundation    (C1 principal bridge → server-side Supabase RLS
+               context; typed Python-API client; shared types) — SMALL INTERFACE PR FIRST
+
+WAVE B (parallel; each owns a distinct feature area — reads Supabase, authority via Python API)
+  ├─ FG-20/B1  GTS Centre (graph, scores, assignment + watchers)   (C9/FG-18/19)
+  ├─ FG-20/B2  Core-area view + interaction-trace timeline          (C7/FG-14 + C8/FG-16)
+  └─ FG-20/B3  onboarding wizard + readiness + tools registry       (FG-15 + FG-07)
+
+WAVE C (agent-coupled + polish — parallel)
+  ├─ FG-20/C1  agent chat pane (one-brain via API) + Supabase Storage attachments/media  (FG-03/D13)
+  ├─ FG-20/C2  agent webview (CDP + C6 consent + C8 trace)                                (FG-17b)
+  └─ FG-20/C3  comms/notifications + change undo/redo + mobile/PWA polish + system test    (FG-10/12)
+```
+
+**Phase-3 parallelization (mirrors §6):** A1 (skeleton) and A2 (auth/data seam)
+run as two parallel agents; **A2 publishes its auth/data-access foundation as a
+small interface PR first** (like Wave 0's contracts) so the Wave-B/C agents
+share one Supabase-context + API-client seam instead of colliding. Once A merges,
+Wave B fans out to three agents (each a distinct feature area), then Wave C to
+three (chat / webview / comms+polish). Every agent works on its own branch, edits
+only the FG-20 doc, keeps baseline + web build green, preserves the one-brain
+chat path (cache-safe), and re-runs the negative-access RLS + C6 checks. The
+existing `web/` operator console is left intact.
 
 > **FG-02 (blockchain) is ON HOLD** per Leo (2026-07-11). It is excluded from
 > the wave schedule and will not be launched until the owner explicitly
@@ -378,5 +420,6 @@ transient, and in-place-resize to 8/32 (same-family, ~5 min, no data migration
 | 2026-07-04 | 12 | devin (for Leo) | FG-17b / C6 / C7 / C8 | **Implemented FG-17b dashboard new panels** on top of merged FG-19 (frontend + backend, no API rewrite). Read-only **Core-area** projection (`/api/core/manifest` → `CorePage`: boundary health/globs/self-protection/denials + FG-12 change log + FG-16 trace). **GTS Centre** now renders merged FG-19 assignment — `/api/gts/graph` exposes each node's `assignee_user_id` + per-item `grants` (assignee/watchers, scoped by item_grants RLS) with `assignment={enabled:true,scheme:"per-user"}`, and `GtsCentrePage` shows assignee/watcher badges. **Agent webview** (`hermes_cli/webview.py` + `/api/webview/*` + `WebviewPage`): default-deny, session-scoped consent, read-only vs interactive, credentialed/destructive/off-scope **escalation → C6 approval**, C8 `InteractionLedger` tracing, per-user opaque UUID5 browser-profile dirs, over the existing `tools/browser_cdp_tool` CDP toolset; fixed a `NameError: uuid` in the escalation path. **Embedded Telegram** pane (`TelegramPage`) — doc-sanctioned native-chat fallback that reuses the existing one-brain `/chat` (TUI→`tui_gateway`→`AIAgent`) since the official web-widget can't embed under dashboard auth. **Tool link/icon registration** reused the existing dashboard-plugin manifest system (no new surface, Footprint-Ladder rung 1). Tests: `test_webview.py` (8) + real-FastAPI+Postgres `test_fg17b_dashboard_e2e.py` (7: default-deny/allow/escalate/approval/traces/isolation/Core/GTS+FG-19) + web vitest helpers; web lint(0 err)/typecheck/build green, `ruff` clean, FG-19 E2E still green. | Phase-2 req 17.0 FG-17b: land the new panels + consent-gated agent webview on the merged FG-19 base, tested on real paths, without duplicating chat/agent or growing the core waist. ECS system-test box + prod promotion remain separate gated steps owned by Leo. |
 | 2026-07-04 | 13 | devin:3c64bcf2 (for Leo) | infra/prod | **Production cutover to the strong box.** `https://leolau.ai-and-i.io` now served by the 4/16 `hermes-systest` box (`47.83.199.25`) running current `develop` + FG-17 dashboard: Cloudflare DNS (A record repointed 8.217.86.90→47.83.199.25, DNS-only), Caddy + Let's Encrypt HTTPS → `127.0.0.1:9119`, password-gated dashboard, raw port 9119 not exposed. Telegram `@ai_prentice_systest_01_bot` now an always-on `hermes-gateway.service` on this box only (old box poller stopped → dual-poll conflict ended). All 10 targeted FGs (03/04/05/08/11/12/16/18/15/17) promoted to `app_prod` (9→25 tables, RLS, audit rows, backups + functional smoke). Old 2/4 box (`8.217.86.90`) stopped but intact for rollback. Operational note (no design change) captured in [`../SESSION-HANDOFF-2026-07-prod-cutover.md`](../SESSION-HANDOFF-2026-07-prod-cutover.md). Open follow-up: rotate the exposed dashboard owner password. | Leo: put the public product on the stronger hardware (D8), serve current code + FG-17, keep auth + single Telegram poller, retain rollback. |
 | 2026-07-13 | 14 | devin:8cec0d47 (for Leo) | docs | **Corrected stale FG status headers + prod-cutover "remaining FGs" list to match `develop`.** FG-01/06/07/10/13/14/19 headers still read "Not started" despite being implemented + merged (PRs #12/#18/#20/#19/#9/#27/#35); updated each to "Implemented — merged to `develop`; ECS system-test/prod-promotion owner-gated". Fixed §8 item 6 of `SESSION-HANDOFF-2026-07-prod-cutover.md`, which had listed those FGs as un-written work: all 19 FGs are implemented + merged except FG-02 (on hold); only 10 were promoted to `app_prod` in the cutover, so the real remaining work for FG-01/06/07/09/10/13/14/19 is the owner-gated system-test + promotion, not code. Docs-only, no code/behavior change. | Keep the plan's status metadata truthful so the next agent/human doesn't re-implement already-merged feature groups. |
+| 2026-07-11 | 16 | devin:8cec0d47 (for Leo) | Phase-3 plan / FG-20 | **Added Phase-3 plan: `agent-home` — a new mobile-first Next.js app** (`docs/.../feature-groups/FG-20-agent-home-nextjs-supabase.md`). Locks the three-tier architecture (**D16**): **Next.js UI + Python AI layer (`/api/*`) + Supabase (Postgres + Storage + RLS)**. `agent-home` becomes the user-facing face and hosts **all Phase-2 features** (GTS Centre + assignment, onboarding, Core-area view, interaction trace, one-brain chat, agent webview, tools) in a mobile-first/PWA UI; the existing `web/` stays as the operator/admin console. Uses a **BFF pattern** — the `agent-home` server holds the C1 principal context, proxies agent/authority ops to the Python API, and does server-side Supabase reads with the principal's RLS context (+ RLS-scoped Realtime); the browser never gets a privileged Supabase key or bypasses C1/C2/C6/C8. **No new contract** (new surface over C1/C2/C3/C5/C6/C7/C8/C9), no new core model tools, no new non-secret `HERMES_*` env vars, one-brain chat unchanged (cache-safe). Added a Phase-3 wave/parallelization plan (A skeleton+auth seam → B GTS/Core+trace/onboarding+tools → C chat/webview/comms+polish). Docs-only, no code. **Open decisions flagged for owner** (auth-identity bridge vs GoTrue; deploy on-box vs Vercel; `web/` fate; app location) — implementation gated on confirmation. | Leo: the current dashboard isn't mobile-friendly/is hard to use — build a purpose-built mobile Next.js face on the fixed Next.js + Python + Supabase stack and move all the new features into it. |
 | 2026-07-11 | 15 | devin:8cec0d47 (for Leo) | naming | **Project renamed "ai-prentice" → "ai-prentice-4-all".** GitHub repo renamed `leolau/hermes-agent` → `leolau/ai-prentice-4-all` (GitHub auto-redirects old URLs). Product-name references updated across the master plan, per-FG docs, and hand-off docs; the per-FG cloud-agent-prompt repo slugs were repointed `leolau/hermes-agent` → `leolau/ai-prentice-4-all`. Left untouched: the upstream **Hermes** framework identifiers (`hermes_cli/`, the `hermes` CLI, `HERMES_HOME`, package imports, `/opt/data/hermes-agent` paths) and live-infra identifiers (Telegram bot `@ai_prentice_systest_01_bot`, ECS instance names `hermes-systest`/`ai-prentice`/`ai-prentice-agentdoc`, example test hostnames `ai-prentice-2`). Docs/naming-only, no behavior change. | Leo: standardise on the product name "ai-prentice-4-all" everywhere without breaking the running framework or production infra. |
 | 2026-07-12 | 9 | devin:b9d4f38f (for Leo) | FG-18 / C9 | Implemented the unified GTS graph (`hermes_cli/gts.py` `GtsCentre`), **extending** FG-04 `goals` + FG-06 `tasks` (+ existing skills) in C3-routed `app_dev`/`app_prod` — additive `parent_*_id`/`level`/`priority`/`score`/`evaluation_method_ref` columns plus `skills_registry`, `task_goals`, `task_skills`, `evaluation_methods`; no new goal/task store. Authority is fail-closed (user-only top-level goals + evaluation methods; agent refused + audited via C8 `core_denied` + durable JSONL + optional C5 sink); scores are always computed, clamped 0–100, and roll up by priority weight; cycle-safe hierarchy; cache-safe surfacing (`render_gts_block`, never mutates the system prompt). Engine marked Core (`core_manifest.yaml` + `agent/core_boundary.py`). | Phase-2 req 18.0: publish C9 as one graph over the existing stores with a hard user/agent authority boundary and computed rollup scores, without breaking prompt-cache or the Core waist. ECS system-test box + prod promotion remain separate gated steps owned by Leo. |
