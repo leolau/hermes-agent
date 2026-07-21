@@ -1,6 +1,6 @@
 # FG-20 — `agent-home`: mobile-first Next.js face on the Python AI layer + Supabase
 
-**Wave:** Phase-3 (A→B→C) · **Owner agent:** _unassigned_ · **Status:** PLAN (docs only) — no code yet; pending owner confirmation of the open decisions in §"Open decisions"
+**Wave:** Phase-3 (A→B→C) · **Owner agent:** _unassigned_ · **Status:** PLAN — **owner-confirmed** (Leo, 2026-07-11: all four decisions in §"Open decisions (RESOLVED)" locked); ready to implement (Wave A first). No code yet.
 
 ## Summary
 Build a **new, mobile-first web app called `agent-home`** that becomes the
@@ -135,25 +135,25 @@ cache-safety tests green; baseline + web build + `ruff`/`ty` green;
 `agent-home` deployed behind Caddy on the box and reachable on a phone; **ECS
 system test green** (owner-gated).
 
-## Open decisions (need owner confirmation before Wave A)
-1. **Auth/identity for `agent-home`→Supabase.**
-   - **(default) Bridge C1 principal → server-side Supabase context** (set the
-     same `hermes.principal_*` GUCs on `agent-home`'s server DB connection).
-     Zero RLS rework; reuses today's model exactly; browser never touches raw
-     Supabase.
-   - **(alt) Adopt Supabase Auth (GoTrue) + `auth.uid()` RLS**, mapping
-     `principals` ↔ `auth.users`. Enables true browser-direct Realtime under
-     RLS, and is the cleaner long-term identity story — but it is a real RLS
-     rework and an auth migration. Recommend deferring to a follow-up unless
-     browser-direct is a hard requirement.
-2. **Deploy target:** on-box behind Caddy (default) vs Vercel (needs public
-   Supabase/Kong + the GoTrue bridge).
-3. **Fate of `web/`:** keep as operator/admin console (default) vs plan its full
-   replacement by `agent-home` later.
-4. **App location:** `agent-home/` at repo root (default) vs `apps/agent-home`.
+## Open decisions (RESOLVED — owner-confirmed, Leo 2026-07-11)
+1. **Auth/identity for `agent-home`→Supabase → BRIDGE C1 principal → server-side
+   Supabase context.** Set the same `hermes.principal_*` GUCs on `agent-home`'s
+   server DB connection; **zero RLS rework**, reuses today's C2 model exactly;
+   the browser never touches raw Supabase. (GoTrue/`auth.uid()` browser-direct
+   is explicitly **deferred** to a possible follow-up, not this build.)
+2. **Deploy target → ON-BOX behind Caddy** (new route/subdomain on the prod box,
+   same Supabase), matching the current prod topology. (Vercel deferred.)
+3. **Fate of `web/` → COEXIST (option A).** `agent-home` = the user/mobile face;
+   `web/` stays the **operator/admin console** (Sessions, Models, Cron, Plugins,
+   Env, Files, Logs, MCP, Profiles, Channels, Pairing, Config, Webhooks,
+   System). Both hit the same Python API + Supabase. During transition the
+   Phase-2 user panels exist in both; once `agent-home` reaches parity, **retire
+   only those duplicated user panels from `web/`**, leaving the admin surfaces.
+   Full replacement is a possible later step, not this build.
+4. **App location → `agent-home/` at repo root** (sibling of `web/`).
 
 ## Progress checklist
-- [ ] Owner confirms Open-decisions §1–4
+- [x] Owner confirms Open-decisions §1–4 (Leo, 2026-07-11: bridge-C1 auth, on-box Caddy, coexist `web/`, `agent-home/` at root)
 - [ ] Wave A1: `agent-home` Next.js skeleton (App Router, Tailwind, mobile shell + bottom-nav, PWA, `supabase-js`, `data-component`, build/CI, on-box Caddy route)
 - [ ] Wave A2: auth + data-access foundation (C1 principal bridge → server-side Supabase RLS context; typed Python-API client; shared types) — **published as a small interface PR first**
 - [ ] Wave B1: GTS Centre (graph, scores, assignment + watchers)
@@ -169,6 +169,7 @@ system test green** (owner-gated).
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 (for Leo) | Created FG doc (PLAN) | Leo: build a new mobile-first Next.js `agent-home` on the fixed three-tier stack (Next.js + Python AI layer + Supabase) and move all Phase-2 features into it; existing `web/` is not mobile-friendly. |
+| 2026-07-11 | 2 | devin:8cec0d47 (for Leo) | Locked the 4 open decisions (owner-confirmed) | Leo confirmed: (1) bridge C1 principal → server-side Supabase RLS context (GoTrue browser-direct deferred), (2) deploy on-box behind Caddy, (3) coexist — `web/` stays the operator/admin console (option A), (4) `agent-home/` at repo root. Plan is now actionable; Wave A next. |
 
 ## Cloud-agent prompt
 > **[Phase-3 — after owner confirms Open-decisions §1–4; Wave A first]** Repo `leolau/ai-prentice-4-all`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-20`). Build a **new mobile-first Next.js App-Router app `agent-home/`** (sibling of `web/`) that is the user-facing face of the system and hosts **all Phase-2 features** (GTS Centre + assignment, onboarding, Core-area view, interaction trace, one-brain agent chat, agent webview, tools). Architecture is fixed: **Next.js UI → Python AI layer (`/api/*`) → Supabase (Postgres + Storage + RLS)**. Use a **BFF pattern**: the `agent-home` server (RSC/route handlers) holds the authenticated **C1 principal** context, proxies all agent/authority operations to the **Python API** (one-brain chat, CDP webview, GTS authority writes, onboarding readiness, Core manifest/health, tool enable/promote, comms actions), and does **server-side** Supabase reads with the principal's RLS context (mirror the `hermes.principal_*` GUCs) plus RLS-scoped Realtime for live GTS/trace views. The **browser never** gets a service-role key or bypasses C1/C2/C6/C8. Add **zero** new model tools and **zero** new non-secret `HERMES_*` env vars (behaviour → `config.yaml`). Keep chat on the **one-brain gateway** unchanged (cache-/alternation-safe; traces never injected). Reuse the Nous theme tokens + the `data-component` babel plugin; redesign layouts **mobile-first** (bottom-nav, sheets, touch targets, PWA). **Keep `web/`** as the operator/admin console. Follow `AGENTS.md` (extend-don't-duplicate, footprint ladder). Add parity + mobile/PWA + **negative-access RLS** + C6 + cache-safety tests; keep baseline + web build + `ruff`/`ty` green. Publish the **Wave-A2 auth/data-access foundation as a small interface PR first**, then fan out Wave B (GTS / Core+trace / onboarding+tools) and Wave C (chat / webview / comms+polish) as parallel agents. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist passes** — coordinate with Leo.
