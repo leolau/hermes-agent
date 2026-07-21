@@ -1,0 +1,4 @@
+{
+  "presets": ["next/babel"],
+  "plugins": ["./tools/babel-plugin-data-component.cjs"]
+}
