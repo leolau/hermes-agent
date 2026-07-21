@@ -1,6 +1,6 @@
 # FG-10 — Human communications: Telegram + web app
 
-**Wave:** 2 · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** 2 · **Owner agent:** _unassigned_ · **Status:** Implemented (human-comms parity across Telegram + web) — merged to `develop` (PR #19); ECS system-test + prod promotion remain owner-gated
 
 ## Summary
 Give humans **two first-class control/communication surfaces** — **Telegram**

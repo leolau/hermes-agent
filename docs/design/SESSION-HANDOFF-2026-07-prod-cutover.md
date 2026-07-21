@@ -182,8 +182,13 @@ sessions.
 4. Optionally verify a **fresh live Telegram round-trip** from the owner's phone.
 5. **FG-03 live WhatsApp/email round-trip** + auto-reply/SMTP — pending channel
    creds (Gmail IMAP app-passwords; WhatsApp QR bind).
-6. Continue remaining feature groups: **FG-01, 06, 07, 10, 13, 14** (and remaining
-   FG-19 pieces beyond what shipped).
+6. **Promote the merged-but-not-yet-promoted feature groups.** All FGs are
+   implemented + merged to `develop` except **FG-02** (blockchain, on hold) —
+   there is no un-written FG. Only 10 were promoted to `app_prod` in this cutover
+   (FG-03/04/05/08/11/12/15/16/17/18); still `develop`-only for prod:
+   **FG-01, 06, 07, 09, 10, 13, 14, 19** (each has a merged PR — #12/#18/#20/#22/#19/#9/#27/#35).
+   Their remaining work is the owner-gated ECS system-test + prod promotion, not
+   new code. FG-19 is complete (lifecycle + RLS + authority + audit E2E green).
 7. **FG-02 blockchain** stays ON HOLD unless the owner resumes it.
 8. Optionally flip `datastore.mode` to `prod` (or a dedicated prod host) so the
    dashboard reads prod data — currently intentionally on `dev`.

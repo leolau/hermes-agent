@@ -1,6 +1,6 @@
 # FG-19 — Per-user GTS isolation + cross-user assignment
 
-**Wave:** C (Phase-2) · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** C (Phase-2) · **Owner agent:** devin:3c64bcf2 (for Leo) · **Status:** Implemented (per-user GTS isolation + per-item cross-user assignment; grant-aware C2 + FORCE'd Postgres RLS; assign/reassign/accept/decline/revoke lifecycle; real-Postgres E2E green) — merged to `develop` (PR #35); ECS system-test + prod promotion remain owner-gated
 
 ## Summary
 Each user has their **own Goals/Tasks/Skills, independent** of others; the

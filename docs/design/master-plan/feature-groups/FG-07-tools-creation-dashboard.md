@@ -1,6 +1,6 @@
 # FG-07 — Tools creation & configuration + Dashboard
 
-**Wave:** 2 · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** 2 · **Owner agent:** _unassigned_ · **Status:** Implemented (in-house tool creation + dashboard + registry) — merged to `develop` (PR #20); ECS system-test + prod promotion remain owner-gated
 
 ## Summary
 Let users/agents **create and configure tools** and manage them from a

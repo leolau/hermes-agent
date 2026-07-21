@@ -1,6 +1,6 @@
 # FG-13 — Dev vs Prod mode + dev SQLite/Supabase (channels prod-only)
 
-**Wave:** 0 (foundation) · **Owner agent:** _unassigned_ · **Status:** Not started
+**Wave:** 0 (foundation) · **Owner agent:** _unassigned_ · **Status:** Implemented (C3 dev/prod datastore routing + promotion, `hermes_cli/datastore.py`) — merged to `develop` (PR #9); ECS system-test remains owner-gated
 
 ## Summary
 Introduce a first-class **mode** (`dev` | `prod`) for everything users/agents
