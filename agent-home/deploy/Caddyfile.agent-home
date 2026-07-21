@@ -8,11 +8,14 @@
 #
 # BFF note: the browser only ever talks to the agent-home Next server, which
 # makes server-side calls to the Python AI layer (127.0.0.1:9119). So ALL public
-# traffic on this origin goes to Next (127.0.0.1:3000) — including agent-home's
+# traffic on this origin goes to Next (127.0.0.1:3100) — including agent-home's
 # own /api/session/* route handlers. Do NOT split /api/* to 9119 here; that
 # would break the login/logout bridge routes. The Python API stays private.
+#
+# Port 3100 (not 3000): :3000 on this box is the WhatsApp bridge. Match the
+# PORT set in the service's EnvironmentFile.
 
 home.leolau.ai-and-i.io {
     encode zstd gzip
-    reverse_proxy 127.0.0.1:3000
+    reverse_proxy 127.0.0.1:3100
 }

@@ -68,9 +68,10 @@ Python AI layer and the **same Supabase**, fronted by the existing Caddy.
    ```bash
    npm ci --workspace agent-home
    npm run --prefix agent-home build
-   # served by `next start` (default :3000) under a process manager
-   # (systemd/pm2), with the .env from `.env.example` populated.
-   PORT=3000 npm run --prefix agent-home start
+   # served by `next start` under a process manager (systemd/pm2), with the
+   # env from `.env.example` populated. Pick a PORT that is free on the box
+   # (the prod box uses 3100 because :3000 is the WhatsApp bridge).
+   PORT=3100 npm run --prefix agent-home start
    ```
 
 2. **Subdomain** (recommended): serve the app at `home.<domain>`. This is a BFF:
@@ -82,7 +83,7 @@ Python AI layer and the **same Supabase**, fronted by the existing Caddy.
    ```caddy
    home.example.com {
        encode zstd gzip
-       reverse_proxy 127.0.0.1:3000
+       reverse_proxy 127.0.0.1:3100
    }
    ```
 
