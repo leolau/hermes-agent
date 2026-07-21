@@ -73,26 +73,27 @@ Python AI layer and the **same Supabase**, fronted by the existing Caddy.
    PORT=3000 npm run --prefix agent-home start
    ```
 
-2. **Subdomain** (recommended): serve the app at `home.<domain>` and keep the
-   Python API reachable at the same origin so the bridge's `/auth/*` and
-   `/api/*` forwards stay first-party. Caddyfile:
+2. **Subdomain** (recommended): serve the app at `home.<domain>`. This is a BFF:
+   the browser only ever talks to the Next server, which calls the Python AI
+   layer **server-side** (via `AGENT_HOME_API_URL`). So all public traffic on
+   this origin — including agent-home's own `/api/session/*` route handlers —
+   goes to Next; the Python API is never exposed here. Caddyfile:
 
    ```caddy
    home.example.com {
        encode zstd gzip
-
-       # Auth + agent/authority API stay on the Python layer (same origin as
-       # the UI so the bridged session cookie is first-party).
-       @api path /api/* /auth/*
-       reverse_proxy @api 127.0.0.1:9119
-
-       # Everything else is the agent-home Next.js server.
        reverse_proxy 127.0.0.1:3000
    }
    ```
 
    Then set `AGENT_HOME_API_URL=http://127.0.0.1:9119` and
-   `AGENT_HOME_DATASTORE_MODE=prod` in the app's `.env`.
+   `AGENT_HOME_DATASTORE_MODE=prod` in the app's `.env`. Do **not** split
+   `/api/*` to the Python layer here — that would shadow the login/logout
+   bridge routes the Next server owns.
+
+   A ready-to-use unit + Caddy block + step-by-step runbook for the actual prod
+   box live in [`deploy/`](./deploy/) (`agent-home.service`,
+   `Caddyfile.agent-home`, `DEPLOY.md`).
 
 3. **Sub-path alternative** (if a subdomain is undesirable): mount under
    `/home` on the existing site and set Next's `basePath: "/home"`. A subdomain
