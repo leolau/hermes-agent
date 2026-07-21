@@ -60,6 +60,25 @@ export function supabaseAnonKey(): string {
 }
 
 /**
+ * Server-side Supabase Storage key for uploading chat media (secret; `.env`).
+ * The browser never receives this — uploads go through the `agent-home` BFF.
+ * Returns undefined when unset so the attach feature degrades gracefully.
+ */
+export function supabaseStorageKey(): string | undefined {
+  return process.env.SUPABASE_SERVICE_ROLE_KEY || undefined;
+}
+
+/** The Storage bucket chat media is written to. Deploy topology. */
+export function mediaBucket(): string {
+  return process.env.AGENT_HOME_MEDIA_BUCKET || "agent-home-media";
+}
+
+/** Whether server-side chat-media uploads are configured on this box. */
+export function storageConfigured(): boolean {
+  return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+}
+
+/**
  * C3 datastore mode. Dashboard/CLI-style surfaces default to `dev`; the prod
  * deploy sets `AGENT_HOME_DATASTORE_MODE=prod`. Never invents a third mode.
  */

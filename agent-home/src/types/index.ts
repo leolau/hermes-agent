@@ -313,6 +313,88 @@ export interface ToolsResponse {
   detail?: string;
 }
 
+/** A chat message role in a one-brain conversation (mirror of the store). */
+export type ChatRole = "user" | "assistant" | "system" | "tool";
+
+/**
+ * A single persisted conversation message (mirror of the `messages` row the
+ * Python `SessionDB` returns). Only the fields the mobile chat pane renders are
+ * typed; `tool` rows are kept out of the visible thread.
+ */
+export interface ChatMessage {
+  id?: number;
+  role: ChatRole;
+  content: string;
+  timestamp?: number | string | null;
+}
+
+/**
+ * A conversation summary row (mirror of `SessionDB.list_sessions_rich`): the
+ * id, its human title/preview, message count, and last-active timestamp used to
+ * order the mobile conversation list.
+ */
+export interface SessionSummary {
+  id: string;
+  source: string;
+  title: string | null;
+  preview: string | null;
+  message_count: number;
+  started_at: number | null;
+  last_active: number | null;
+  ended_at: number | null;
+  is_active?: boolean;
+}
+
+/** The list of conversations from `GET /api/sessions`. */
+export interface SessionsResponse {
+  sessions: SessionSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** One conversation's persisted transcript from `GET /api/sessions/{id}/messages`. */
+export interface ChatMessagesResponse {
+  session_id: string;
+  messages: ChatMessage[];
+}
+
+/** Token accounting a one-brain turn reports (mirror of the agent usage dict). */
+export interface ChatUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+}
+
+/**
+ * The reply from `POST /api/sessions/{id}/chat`: the (possibly resumed) session
+ * id the turn landed on, the assistant message, and optional usage.
+ */
+export interface ChatSendResponse {
+  session_id: string;
+  message: ChatMessage;
+  usage?: ChatUsage;
+}
+
+/** The result of creating a conversation via `POST /api/sessions`. */
+export interface SessionCreateResponse {
+  session_id: string;
+  source: string;
+}
+
+/**
+ * A media attachment uploaded server-side to principal-scoped Supabase Storage
+ * (browser never holds the storage key). `url` is the reference the composer
+ * appends to the outgoing message and the thread renders inline.
+ */
+export interface ChatAttachment {
+  path: string;
+  url: string;
+  name: string;
+  content_type: string;
+  size: number;
+}
+
 /** A comms/notification item (FG-10). Minimal; extend as Wave C3 lands. */
 export interface Notification {
   id: string;

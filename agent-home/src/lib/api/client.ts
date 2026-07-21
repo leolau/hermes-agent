@@ -17,11 +17,15 @@ import "server-only";
 import { hermesApiBaseUrl } from "@/lib/env";
 import type {
   ChangesResponse,
+  ChatMessagesResponse,
+  ChatSendResponse,
   CoreManifestResponse,
   GtsGraphResponse,
   Notification,
   OnboardingReadinessResponse,
   Principal,
+  SessionCreateResponse,
+  SessionsResponse,
   StoreMode,
   ToolsResponse,
   TraceDetailResponse,
@@ -160,6 +164,55 @@ export class HermesApiClient {
   async tools(mode?: StoreMode): Promise<ToolsResponse> {
     const qs = mode ? `?mode=${encodeURIComponent(mode)}` : "";
     return this.request(`/api/tools${qs}`);
+  }
+
+  /**
+   * List the principal's conversations (read path). Defaults to the
+   * `agent_home` source ordered by most-recent activity so the mobile chat
+   * list surfaces the conversations started from this app first.
+   */
+  async sessions(
+    opts: { source?: string; limit?: number; order?: "created" | "recent" } = {},
+  ): Promise<SessionsResponse> {
+    const params = new URLSearchParams();
+    if (opts.source) params.set("source", opts.source);
+    params.set("limit", String(opts.limit ?? 30));
+    params.set("order", opts.order ?? "recent");
+    return this.request(`/api/sessions?${params.toString()}`);
+  }
+
+  /** Load one conversation's persisted transcript (read path). */
+  async sessionMessages(sessionId: string): Promise<ChatMessagesResponse> {
+    return this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+    );
+  }
+
+  /**
+   * Create a new conversation (owner-attributed) via `POST /api/sessions`.
+   * Idempotent server-side: a supplied id that already exists is a 409.
+   */
+  async createSession(sessionId?: string): Promise<SessionCreateResponse> {
+    return this.request("/api/sessions", {
+      method: "POST",
+      json: sessionId ? { session_id: sessionId } : {},
+    });
+  }
+
+  /**
+   * Send one one-brain turn to a conversation via
+   * `POST /api/sessions/{id}/chat` and return the assistant reply. The turn is
+   * driven by the shared `AIAgent` + `SessionDB` under the C1 principal — this
+   * client never re-implements the conversation loop, it forwards the message.
+   */
+  async sendChat(
+    sessionId: string,
+    message: string,
+  ): Promise<ChatSendResponse> {
+    return this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/chat`,
+      { method: "POST", json: { message } },
+    );
   }
 
   /** List pending comms/notifications visible to the principal (C2-scoped). */
