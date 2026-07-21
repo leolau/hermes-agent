@@ -1,0 +1,18 @@
+# Caddy site block for agent-home (FG-20). Append to /etc/caddy/Caddyfile on the
+# prod box (alongside the existing `leolau.ai-and-i.io` dashboard block), then
+# `sudo systemctl reload caddy`. Caddy fetches a Let's Encrypt cert for the
+# subdomain automatically (HTTP-01), same as the dashboard.
+#
+# Replace the hostname with the subdomain you point at the box (A record ->
+# 47.83.199.25, DNS-only / unproxied, matching the existing dashboard record).
+#
+# BFF note: the browser only ever talks to the agent-home Next server, which
+# makes server-side calls to the Python AI layer (127.0.0.1:9119). So ALL public
+# traffic on this origin goes to Next (127.0.0.1:3000) — including agent-home's
+# own /api/session/* route handlers. Do NOT split /api/* to 9119 here; that
+# would break the login/logout bridge routes. The Python API stays private.
+
+home.leolau.ai-and-i.io {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:3000
+}

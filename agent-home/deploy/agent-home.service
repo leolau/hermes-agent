@@ -1,0 +1,38 @@
+# systemd unit for agent-home (FG-20 mobile PWA, Next.js BFF) on the prod box.
+#
+# Serves the production build on loopback only (127.0.0.1:3000); Caddy
+# terminates TLS on the public subdomain and reverse-proxies to it (see
+# Caddyfile.agent-home). The Next server makes server-side calls to the Python
+# AI layer at AGENT_HOME_API_URL (127.0.0.1:9119) — the Python API is never
+# exposed on the public agent-home origin.
+#
+# Install (adjust paths/User to the box; see deploy/DEPLOY.md):
+#   sudo cp agent-home/deploy/agent-home.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now agent-home.service
+#
+# Secrets are read from an EnvironmentFile that is NOT committed
+# (agent-home/.env.production, 0600, owned by the service user).
+
+[Unit]
+Description=agent-home (FG-20 mobile PWA, Next.js) behind Caddy
+Documentation=https://github.com/leolau/ai-prentice-4-all/blob/develop/agent-home/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/data/hermes-agent/agent-home
+EnvironmentFile=/opt/data/hermes-agent/agent-home/.env.production
+# PATH must resolve node/npm for the service user. Verify with `command -v npm`
+# on the box during deploy and edit this line if node lives elsewhere (e.g. nvm).
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/data/hermes-agent/agent-home/deploy/start.sh
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
