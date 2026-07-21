@@ -154,8 +154,8 @@ system test green** (owner-gated).
 
 ## Progress checklist
 - [x] Owner confirms Open-decisions §1–4 (Leo, 2026-07-11: bridge-C1 auth, on-box Caddy, coexist `web/`, `agent-home/` at root)
-- [ ] Wave A1: `agent-home` Next.js skeleton (App Router, Tailwind, mobile shell + bottom-nav, PWA, `supabase-js`, `data-component`, build/CI, on-box Caddy route)
-- [ ] Wave A2: auth + data-access foundation (C1 principal bridge → server-side Supabase RLS context; typed Python-API client; shared types) — **published as a small interface PR first**
+- [x] Wave A1: `agent-home` Next.js skeleton (App Router, Tailwind, mobile shell + bottom-nav, PWA, `supabase-js`, `data-component`, build/CI, on-box Caddy route)
+- [x] Wave A2: auth + data-access foundation (C1 principal bridge → server-side Supabase RLS context; typed Python-API client; shared types) — **published as a small interface PR first**
 - [ ] Wave B1: GTS Centre (graph, scores, assignment + watchers)
 - [ ] Wave B2: Core-area view + interaction-trace timeline
 - [ ] Wave B3: onboarding wizard + readiness + tools registry
@@ -170,6 +170,46 @@ system test green** (owner-gated).
 |------|---------|--------|--------|-----------|
 | 2026-07-11 | 1 | devin:8cec0d47 (for Leo) | Created FG doc (PLAN) | Leo: build a new mobile-first Next.js `agent-home` on the fixed three-tier stack (Next.js + Python AI layer + Supabase) and move all Phase-2 features into it; existing `web/` is not mobile-friendly. |
 | 2026-07-11 | 2 | devin:8cec0d47 (for Leo) | Locked the 4 open decisions (owner-confirmed) | Leo confirmed: (1) bridge C1 principal → server-side Supabase RLS context (GoTrue browser-direct deferred), (2) deploy on-box behind Caddy, (3) coexist — `web/` stays the operator/admin console (option A), (4) `agent-home/` at repo root. Plan is now actionable; Wave A next. |
+| 2026-07-21 | 3 | devin:a7a37d33 (for Leo) | **Wave A landed** — `agent-home/` skeleton + auth/data-access seam (A1+A2). See "Seam API surface (Wave A2)" below. | Foundation all later waves consume: mobile-first Next.js 15 App-Router shell (bottom-nav, safe-area, PWA install + offline shell, `data-component` babel plugin) + the BFF seam (C1 principal bridge → server-side Supabase RLS context → typed Python-API client → shared types → RLS-scoped Realtime stub). `web/` untouched; zero new core tools; zero new non-secret `HERMES_*` env vars. |
+
+### Seam API surface (Wave A2) — for Wave B/C consumers
+
+Everything below is server-side (BFF) unless marked client. Import paths are relative to `agent-home/src`.
+
+**C1 principal bridge — session** (`lib/auth/session.ts`)
+- `SESSION_COOKIE: "agent_home_session"` — the signed (HMAC-SHA256) HttpOnly cookie name.
+- `interface AgentHomeSession { hermesToken: string; principal: Principal; issuedAt: number }`
+- `serializeSession(s: AgentHomeSession): string` / `deserializeSession(v: string | undefined): AgentHomeSession | null` (verifies signature, fails closed).
+- `readSession(): Promise<AgentHomeSession | null>` · `writeSession(s): Promise<void>` · `clearSession(): Promise<void>` (via `next/headers`).
+
+**Principal resolution** (`lib/auth/principal.ts`)
+- `getPrincipal(): Promise<Principal | null>` · `requirePrincipal(): Promise<Principal>` (redirects to `/login`).
+- `apiClientForRequest(): Promise<HermesApiClient>` — client bound to the request's bridged token.
+- `resolvePrincipalFromToken(hermesToken: string): Promise<Principal | null>` (asks `/api/comms/whoami`).
+
+**Server-side Supabase context — C2/C3** (`lib/supabase/context.ts`)
+- `withPrincipalContext<T>(principal, fn: (ctx: PrincipalDbContext) => Promise<T>, opts?: { mode?: StoreMode }): Promise<T>` — opens a READ-ONLY tx, pins `search_path` to the C3 schema (`app_dev`/`app_prod`), and `SET LOCAL`s `hermes.principal_id` / `hermes.principal_role` (mirrors `access.bind_principal`).
+- `interface PrincipalDbContext { principal; mode; schema; query<Row>(text, params?): Promise<Row[]> }`
+- `scopedSelect<Row>(principal, table, opts?: { columns?; limit?; mode? }): Promise<Row[]>` — ergonomic RLS-scoped read.
+- `__setPoolForTests(pool)` — test seam.
+
+**RLS mirror** (`lib/supabase/rls.ts`): `GUC_PRINCIPAL_ID`, `GUC_PRINCIPAL_ROLE`, `scopeReadPolicySql(table): string`.
+
+**Typed Python-API client** (`lib/api/client.ts`)
+- `class HermesApiClient` — `new HermesApiClient({ hermesToken?, baseUrl? })`; methods `request<T>(path, init?)`, `whoami()`, `authProviders()`, `notifications()`. Replays the bridged token as the `hermes_session_at` cookie + bearer header.
+- `class HermesApiError extends Error` (`status`, `body`).
+
+**RLS-scoped Realtime — stub** (`lib/supabase/realtime.ts`, client): `createRealtimeClient(config)`, `subscribeScoped<Row>(client, opts): () => void`, `realtimeEnabled(): boolean` (false until browser-direct GoTrue lands).
+
+**Shared types** (`types/index.ts`): `Role`, `Principal`, `StoreMode`, `Visibility`, `GtsGoal`, `GtsTask`, `GtsNode`, `InteractionKind`, `TraceRow`, `Tool`, `Notification`.
+
+**Env (secrets in `.env`, deploy-topology `AGENT_HOME_*`):** `AGENT_HOME_SESSION_SECRET`, `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `AGENT_HOME_API_URL` (default `http://127.0.0.1:9119`), `AGENT_HOME_DATASTORE_MODE` (`dev`/`prod`). Zero new non-secret `HERMES_*` vars.
+
+**Routes:** `/login` (bridge login) · `/` (seam proof: principal + one RLS-scoped read) · `/graph` `/chat` `/activity` (tab placeholders) · `POST /api/session/login` · `POST /api/session/logout`.
+
+**Deploy:** on-box behind Caddy — see `agent-home/README.md` (Caddyfile snippet + subdomain plan). Owner-gated; not deployed.
+
+**Deviations (smallest reasonable choices, no FG guidance):** (1) OAuth-provider bridge login is deferred — Wave A ships the password-provider bridge fully and lists providers; the shape is stable. (2) Realtime is a wired stub gated off until browser-direct GoTrue scoping exists (FG explicitly deferred GoTrue). (3) Non-secret deploy topology uses `AGENT_HOME_*` env (a Node server can't read the Python `config.yaml`), never `HERMES_*`.
 
 ## Cloud-agent prompt
 > **[Phase-3 — after owner confirms Open-decisions §1–4; Wave A first]** Repo `leolau/ai-prentice-4-all`, branch off `develop`. Read `docs/design/master-plan/README.md` and this doc (`FG-20`). Build a **new mobile-first Next.js App-Router app `agent-home/`** (sibling of `web/`) that is the user-facing face of the system and hosts **all Phase-2 features** (GTS Centre + assignment, onboarding, Core-area view, interaction trace, one-brain agent chat, agent webview, tools). Architecture is fixed: **Next.js UI → Python AI layer (`/api/*`) → Supabase (Postgres + Storage + RLS)**. Use a **BFF pattern**: the `agent-home` server (RSC/route handlers) holds the authenticated **C1 principal** context, proxies all agent/authority operations to the **Python API** (one-brain chat, CDP webview, GTS authority writes, onboarding readiness, Core manifest/health, tool enable/promote, comms actions), and does **server-side** Supabase reads with the principal's RLS context (mirror the `hermes.principal_*` GUCs) plus RLS-scoped Realtime for live GTS/trace views. The **browser never** gets a service-role key or bypasses C1/C2/C6/C8. Add **zero** new model tools and **zero** new non-secret `HERMES_*` env vars (behaviour → `config.yaml`). Keep chat on the **one-brain gateway** unchanged (cache-/alternation-safe; traces never injected). Reuse the Nous theme tokens + the `data-component` babel plugin; redesign layouts **mobile-first** (bottom-nav, sheets, touch targets, PWA). **Keep `web/`** as the operator/admin console. Follow `AGENTS.md` (extend-don't-duplicate, footprint ladder). Add parity + mobile/PWA + **negative-access RLS** + C6 + cache-safety tests; keep baseline + web build + `ruff`/`ty` green. Publish the **Wave-A2 auth/data-access foundation as a small interface PR first**, then fan out Wave B (GTS / Core+trace / onboarding+tools) and Wave C (chat / webview / comms+polish) as parallel agents. Edit ONLY this FG doc. Open a PR linking this doc. **Not done until this FG's *System testing (system-test box)* checklist passes** — coordinate with Leo.
