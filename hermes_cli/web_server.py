@@ -9254,6 +9254,116 @@ async def get_session_messages(session_id: str, profile: Optional[str] = None):
         db.close()
 
 
+@app.post("/api/sessions/{session_id}/chat")
+async def session_chat(session_id: str, request: Request):
+    """Drive one one-brain turn for a persisted session as the C1 principal.
+
+    FG-20 C1: agent-home's mobile chat pane calls this through the bridged
+    dashboard session. Reuses the shared one-brain agent builder
+    (``gateway.session_chat``) and the same ``SessionDB`` the gateway/Telegram
+    read, so a mobile turn interleaves with every other surface.
+
+    Trust model matches the other write endpoints: the turn is attributed to
+    the enrolled **owner** principal (no ``?as=`` narrowing). Prompt caching
+    and strict alternation are preserved — history is loaded from the store and
+    passed verbatim, no synthetic user message is injected, and the system
+    prompt is not rebuilt mid-conversation (no ``ephemeral_system_prompt``).
+    """
+    principal = await _comms_resolve_principal(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    user_message = str((body or {}).get("message", "")).strip()
+    if not user_message:
+        raise HTTPException(status_code=400, detail="message is required")
+    profile = (body or {}).get("profile") or None
+
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail="Session not found")
+        sid = db.resolve_resume_session_id(sid)
+        history = db.get_messages_as_conversation(sid)
+    finally:
+        db.close()
+
+    from gateway.session_chat import run_session_turn_sync
+    from gateway.session_context import set_session_vars, clear_session_vars
+
+    loop = asyncio.get_running_loop()
+
+    def _run():
+        # Bind the runtime session-context for the turn (C1 identity flows to
+        # the agent). A SQLite handle can't cross threads, so the agent opens
+        # its own SessionDB inside this executor thread.
+        tokens = set_session_vars(
+            platform="api_server",
+            source="agent_home",
+            user_id=principal.user_id,
+            user_name=getattr(principal, "display", "") or "",
+            session_id=sid,
+            session_key=sid,
+            async_delivery=False,
+        )
+        try:
+            run_db = _open_session_db_for_profile(profile)
+            try:
+                return run_session_turn_sync(
+                    session_db=run_db,
+                    user_message=user_message,
+                    conversation_history=history,
+                    session_id=sid,
+                )
+            finally:
+                run_db.close()
+        finally:
+            clear_session_vars(tokens)
+
+    result, usage = await loop.run_in_executor(None, _run)
+    final_response = result.get("final_response", "") if isinstance(result, dict) else ""
+    effective_sid = result.get("session_id", sid) if isinstance(result, dict) else sid
+    return {
+        "session_id": effective_sid,
+        "message": {"role": "assistant", "content": final_response},
+        "usage": usage,
+    }
+
+
+@app.post("/api/sessions")
+async def create_session_endpoint(request: Request):
+    """Create an empty Hermes session row for a new agent-home conversation.
+
+    Idempotent (INSERT OR IGNORE). Owner-attributed like the other write
+    endpoints. The first ``/chat`` turn then populates it; the session is the
+    same row every other surface (gateway, Telegram, desktop) reads.
+    """
+    await _comms_resolve_principal(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body or {}
+    profile = body.get("profile") or None
+    raw_id = body.get("id") or body.get("session_id")
+    session_id = str(raw_id).strip() if raw_id else f"home_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+
+    from gateway.session import _is_path_unsafe
+
+    if not session_id or re.search(r"[\r\n\x00]", session_id) or _is_path_unsafe(session_id) or len(session_id) > 256:
+        raise HTTPException(status_code=400, detail="Invalid session ID")
+
+    db = _open_session_db_for_profile(profile)
+    try:
+        if db.get_session(session_id):
+            raise HTTPException(status_code=409, detail="Session already exists")
+        db.ensure_session(session_id, source="agent_home")
+    finally:
+        db.close()
+    return {"session_id": session_id, "source": "agent_home"}
+
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session_endpoint(session_id: str, profile: Optional[str] = None):
     # ``profile`` deletes a session belonging to another (local) profile by
