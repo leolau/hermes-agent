@@ -19,4 +19,16 @@ describe("MobileShell", () => {
     // safe-area inset is wired for the notch/home-indicator.
     expect(html).toContain("safe-top");
   });
+
+  it("carries the adaptive breakpoints so it widens past a phone column", () => {
+    const html = renderToStaticMarkup(
+      <MobileShell title="Home" showNav={false}>
+        <p>panel</p>
+      </MobileShell>,
+    );
+    // Tablet widens the column; desktop switches to the sidebar flex layout.
+    expect(html).toContain("md:max-w-2xl");
+    expect(html).toContain("lg:flex");
+    expect(html).toContain("lg:max-w-5xl");
+  });
 });

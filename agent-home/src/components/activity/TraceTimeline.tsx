@@ -43,7 +43,10 @@ export function TraceTimeline({
   }
 
   return (
-    <div data-component="TraceTimeline" className="flex flex-col gap-2">
+    <div
+      data-component="TraceTimeline"
+      className="grid grid-cols-1 gap-2 lg:grid-cols-2 xl:grid-cols-3"
+    >
       {traces.map((trace) => (
         <Link
           key={trace.trace_id}

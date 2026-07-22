@@ -3,34 +3,27 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import { isActive, PRIMARY_NAV } from "@/components/nav-items";
+
 /**
  * Fixed bottom tab navigation — the primary mobile-first nav (FG-20 Wave A1).
  * Large touch targets, clears the phone home indicator via safe-area inset.
- * Tabs: Home, GTS Graph (B1), one-brain Chat (C1), comms Inbox (C3), Activity
- * trace (B2). Secondary surfaces (Core, Onboarding, Tools, Webview) are linked
- * from Home rather than the nav.
+ * Hidden at `lg`+, where the persistent `SideNav` takes over. Tabs come from
+ * the shared `nav-items` model; secondary surfaces (Core, Onboarding, Tools,
+ * Webview) are linked from Home on mobile and from the sidebar on desktop.
  */
-const TABS: { href: string; label: string; glyph: string }[] = [
-  { href: "/", label: "Home", glyph: "◉" },
-  { href: "/graph", label: "Graph", glyph: "◈" },
-  { href: "/chat", label: "Chat", glyph: "✦" },
-  { href: "/inbox", label: "Inbox", glyph: "✉" },
-  { href: "/activity", label: "Activity", glyph: "≋" },
-];
-
 export function BottomNav() {
   const pathname = usePathname();
   return (
     <nav
       data-component="BottomNav"
       aria-label="Primary"
-      className="fixed inset-x-0 bottom-0 z-30 border-t border-[var(--color-border)] bg-[var(--color-surface)]/95 backdrop-blur"
+      className="fixed inset-x-0 bottom-0 z-30 border-t border-[var(--color-border)] bg-[var(--color-surface)]/95 backdrop-blur lg:hidden"
       style={{ paddingBottom: "var(--safe-bottom)" }}
     >
-      <ul className="mx-auto flex max-w-md items-stretch justify-around">
-        {TABS.map((tab) => {
-          const active =
-            tab.href === "/" ? pathname === "/" : pathname.startsWith(tab.href);
+      <ul className="mx-auto flex max-w-md items-stretch justify-around md:max-w-2xl">
+        {PRIMARY_NAV.map((tab) => {
+          const active = isActive(pathname, tab.href);
           return (
             <li key={tab.href} className="flex-1">
               <Link

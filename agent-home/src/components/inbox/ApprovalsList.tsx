@@ -29,7 +29,10 @@ export function ApprovalsList({
   }
 
   return (
-    <section data-component="ApprovalsList" className="flex flex-col gap-3">
+    <section
+      data-component="ApprovalsList"
+      className="grid grid-cols-1 gap-3 lg:grid-cols-2"
+    >
       {notifications.map((item) => {
         const pending = item.status === "pending";
         const busy = busyId === item.id;
