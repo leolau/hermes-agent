@@ -403,3 +403,88 @@ export interface Notification {
   created_at: string;
   answered: boolean;
 }
+
+/**
+ * FG-17b agent-webview consent grant (mirror of `webview.WebviewScope`): the
+ * domains the agent may act on and whether interactive actions are allowed.
+ */
+export type WebviewMode = "read_only" | "interactive";
+
+export interface WebviewScope {
+  allowed_domains: string[];
+  mode: WebviewMode;
+}
+
+/**
+ * An agent action verb requested against the live page (mirror of
+ * `webview.ActionKind`). Read-only kinds run autonomously in scope; interactive
+ * kinds need an `interactive` grant; `submit`/`download` always escalate.
+ */
+export type WebviewActionKind =
+  | "navigate"
+  | "read"
+  | "screenshot"
+  | "scroll"
+  | "click"
+  | "type"
+  | "select"
+  | "submit"
+  | "download";
+
+/** The Option-B policy decision for one webview action (mirror of `webview.Decision`). */
+export type WebviewDecision = "allow" | "escalate" | "deny";
+
+/**
+ * A queued per-action C6 approval (mirror of `webview.PendingApproval.as_dict`):
+ * an escalated action awaiting the user's grant/deny.
+ */
+export interface WebviewPendingApproval {
+  id: string;
+  kind: WebviewActionKind;
+  url: string | null;
+  credentialed: boolean;
+  destructive: boolean;
+  reason: string;
+  created_at: number;
+  resolved: boolean | null;
+}
+
+/**
+ * One user's opted-in webview session (mirror of `webview.WebviewSession.as_dict`):
+ * the consent scope, the C8 trace id grouping its actions, and any pending
+ * approvals. Ephemeral + per-principal (the C2 isolation boundary).
+ */
+export interface WebviewSession {
+  id: string;
+  owner_user_id: string;
+  scope: WebviewScope;
+  profile_dir: string;
+  created_at: number;
+  trace_id: string;
+  pending: WebviewPendingApproval[];
+}
+
+/**
+ * `GET/POST /api/webview/session`: the caller's open session (or `null` for the
+ * default-deny empty state). `configured: false` when the datastore is unset.
+ */
+export interface WebviewSessionResponse {
+  configured: boolean;
+  principal?: string | null;
+  session: WebviewSession | null;
+}
+
+/**
+ * The result of requesting/resolving a webview action
+ * (`POST /api/webview/action` + `/approval/{id}`): the policy decision, its
+ * reason, the CDP execution detail (when it ran), and the escalated approval
+ * (when it queued).
+ */
+export interface WebviewActionResponse {
+  decision: WebviewDecision;
+  reason: string;
+  executed?: boolean;
+  detail?: string;
+  granted?: boolean;
+  approval?: WebviewPendingApproval;
+}

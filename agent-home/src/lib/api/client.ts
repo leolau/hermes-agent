@@ -30,6 +30,10 @@ import type {
   ToolsResponse,
   TraceDetailResponse,
   TracesResponse,
+  WebviewActionKind,
+  WebviewActionResponse,
+  WebviewMode,
+  WebviewSessionResponse,
 } from "@/types";
 
 /** Raised when the Python API returns a non-2xx status. */
@@ -212,6 +216,62 @@ export class HermesApiClient {
     return this.request(
       `/api/sessions/${encodeURIComponent(sessionId)}/chat`,
       { method: "POST", json: { message } },
+    );
+  }
+
+  /**
+   * The caller's open FG-17b webview session (C6 consent-gated), or the
+   * default-deny empty state (`session: null`) when none is open. Read path.
+   */
+  async getWebviewSession(): Promise<WebviewSessionResponse> {
+    return this.request("/api/webview/session");
+  }
+
+  /**
+   * Opt in: open a webview session with an explicit consent scope (allowed
+   * domains + read-only/interactive). Attributed to the owner principal
+   * (never spoofed). Default-deny means nothing runs until this is called.
+   */
+  async openWebviewSession(scope: {
+    allowed_domains: string[];
+    mode: WebviewMode;
+  }): Promise<WebviewSessionResponse> {
+    return this.request("/api/webview/session", {
+      method: "POST",
+      json: scope,
+    });
+  }
+
+  /** Close (opt out of) the caller's webview session. */
+  async closeWebviewSession(): Promise<{ ok: boolean; closed: boolean }> {
+    return this.request("/api/webview/session", { method: "DELETE" });
+  }
+
+  /**
+   * Request one agent action against the live page. The Option-B policy
+   * (enforced server-side) either allows it (runs via CDP + C8 trace) or
+   * escalates it to a per-action C6 approval — this client never decides.
+   */
+  async requestWebviewAction(action: {
+    kind: WebviewActionKind;
+    url?: string | null;
+    credentialed?: boolean;
+    destructive?: boolean;
+  }): Promise<WebviewActionResponse> {
+    return this.request("/api/webview/action", {
+      method: "POST",
+      json: action,
+    });
+  }
+
+  /** Grant or deny a queued per-action C6 approval; on grant the action runs. */
+  async resolveWebviewApproval(
+    approvalId: string,
+    grant: boolean,
+  ): Promise<WebviewActionResponse> {
+    return this.request(
+      `/api/webview/approval/${encodeURIComponent(approvalId)}`,
+      { method: "POST", json: { grant } },
     );
   }
 
