@@ -395,13 +395,58 @@ export interface ChatAttachment {
   size: number;
 }
 
-/** A comms/notification item (FG-10). Minimal; extend as Wave C3 lands. */
+/** Whether a comms item is a consent **approval** (grant/deny) or a proactive **ask** (acknowledge). */
+export type NotificationKind = "approval" | "ask";
+
+/** A comms item's settlement state (mirror of `human_comms.NotificationStatus`). */
+export type NotificationStatus = "pending" | "answered" | "expired";
+
+/**
+ * A FG-10 human-comms item (mirror of `human_comms.Notification.as_dict`): a
+ * pending approval or proactive ask visible to the principal (C2-scoped),
+ * de-duplicated across surfaces (web/Telegram).
+ */
 export interface Notification {
   id: string;
-  kind: string;
-  summary: string;
-  created_at: string;
-  answered: boolean;
+  kind: NotificationKind;
+  owner_user_id: string;
+  visibility: Visibility;
+  title: string;
+  body: string;
+  command: string;
+  reversible: boolean;
+  status: NotificationStatus;
+  answer: string | null;
+  answered_by: string | null;
+  answered_via: string | null;
+  delivered: boolean;
+  created_at: string | null;
+  answered_at: string | null;
+}
+
+/** The C2-scoped FG-10 notifications inbox from `/api/comms/notifications`. */
+export interface NotificationsResponse {
+  configured: boolean;
+  principal?: string | null;
+  notifications: Notification[];
+}
+
+/**
+ * `POST /api/comms/notifications/{id}/answer`: the settled item plus whether
+ * *this* surface was the one that settled it (`newly_answered` is false when
+ * another surface, e.g. Telegram, answered first).
+ */
+export interface NotificationAnswerResponse {
+  ok: boolean;
+  newly_answered: boolean;
+  notification: Notification;
+}
+
+/** `POST /api/comms/changes/{ref}/{undo|redo}`: the reverted/reapplied change. */
+export interface ChangeOpResponse {
+  ok: boolean;
+  change_ref: string;
+  target_kind: string;
 }
 
 /**

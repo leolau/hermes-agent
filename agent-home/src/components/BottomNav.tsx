@@ -6,13 +6,15 @@ import { usePathname } from "next/navigation";
 /**
  * Fixed bottom tab navigation — the primary mobile-first nav (FG-20 Wave A1).
  * Large touch targets, clears the phone home indicator via safe-area inset.
- * The destinations beyond Home are placeholders proving the shell; the real
- * feature panels (GTS, Chat, Webview) land in Waves B/C.
+ * Tabs: Home, GTS Graph (B1), one-brain Chat (C1), comms Inbox (C3), Activity
+ * trace (B2). Secondary surfaces (Core, Onboarding, Tools, Webview) are linked
+ * from Home rather than the nav.
  */
 const TABS: { href: string; label: string; glyph: string }[] = [
   { href: "/", label: "Home", glyph: "◉" },
   { href: "/graph", label: "Graph", glyph: "◈" },
   { href: "/chat", label: "Chat", glyph: "✦" },
+  { href: "/inbox", label: "Inbox", glyph: "✉" },
   { href: "/activity", label: "Activity", glyph: "≋" },
 ];
 

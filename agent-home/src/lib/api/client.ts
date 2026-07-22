@@ -16,12 +16,14 @@ import "server-only";
 
 import { hermesApiBaseUrl } from "@/lib/env";
 import type {
+  ChangeOpResponse,
   ChangesResponse,
   ChatMessagesResponse,
   ChatSendResponse,
   CoreManifestResponse,
   GtsGraphResponse,
-  Notification,
+  NotificationAnswerResponse,
+  NotificationsResponse,
   OnboardingReadinessResponse,
   Principal,
   SessionCreateResponse,
@@ -276,11 +278,39 @@ export class HermesApiClient {
   }
 
   /** List pending comms/notifications visible to the principal (C2-scoped). */
-  async notifications(): Promise<{
-    configured: boolean;
-    notifications: Notification[];
-  }> {
+  async notifications(): Promise<NotificationsResponse> {
     return this.request("/api/comms/notifications");
+  }
+
+  /**
+   * Settle a pending FG-10 item (approval grant/deny, or ask acknowledge). The
+   * answer is idempotent across surfaces; `newly_answered` is false if another
+   * surface (e.g. Telegram) settled it first. Write path (principal, no `?as=`).
+   */
+  async answerNotification(
+    notificationId: string,
+    answer: string,
+  ): Promise<NotificationAnswerResponse> {
+    return this.request(
+      `/api/comms/notifications/${encodeURIComponent(notificationId)}/answer`,
+      { method: "POST", json: { answer } },
+    );
+  }
+
+  /** Undo a visible, reversible FG-12 change (C2 + D6 enforced upstream). */
+  async undoChange(changeRef: string): Promise<ChangeOpResponse> {
+    return this.request(
+      `/api/comms/changes/${encodeURIComponent(changeRef)}/undo`,
+      { method: "POST" },
+    );
+  }
+
+  /** Redo a previously-undone, visible FG-12 change (C2 enforced upstream). */
+  async redoChange(changeRef: string): Promise<ChangeOpResponse> {
+    return this.request(
+      `/api/comms/changes/${encodeURIComponent(changeRef)}/redo`,
+      { method: "POST" },
+    );
   }
 }
 
