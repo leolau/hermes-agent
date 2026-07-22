@@ -138,4 +138,18 @@ describe("ChangesList", () => {
     expect(html).not.toContain(">Undo<");
     expect(html).not.toContain(">Redo<");
   });
+
+  it("drops the Undo button and shows review-only when the id is blocked", () => {
+    const html = renderToStaticMarkup(
+      <ChangesList
+        changes={[REVERSIBLE]}
+        busyId={null}
+        onOp={() => {}}
+        blockedIds={new Set([REVERSIBLE.id])}
+      />,
+    );
+    expect(html).toContain("Not reversible here — review only.");
+    expect(html).not.toContain(">Undo<");
+    expect(html).not.toContain(">Redo<");
+  });
 });

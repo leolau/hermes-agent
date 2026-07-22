@@ -22,6 +22,16 @@ export interface InboxViewProps {
 
 type Tab = "approvals" | "changes";
 
+/** An error carrying the upstream HTTP status so callers can branch on it. */
+class ForwardError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ForwardError";
+    this.status = status;
+  }
+}
+
 async function postJson<T>(url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
@@ -31,7 +41,10 @@ async function postJson<T>(url: string, body?: unknown): Promise<T> {
   });
   const parsed = (await res.json()) as T & { detail?: string; error?: string };
   if (!res.ok) {
-    throw new Error(parsed.detail ?? parsed.error ?? "The request was refused.");
+    throw new ForwardError(
+      res.status,
+      parsed.detail ?? parsed.error ?? "The request was refused.",
+    );
   }
   return parsed;
 }
@@ -58,6 +71,11 @@ export function InboxView({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Ids the upstream engine reported it cannot replay (a 409). These rows are
+  // `reversible` in the log but their inverse op was recorded by a flow FG-12
+  // does not know how to reverse, so we present them as review-only rather
+  // than re-offering an action that can never succeed.
+  const [blocked, setBlocked] = useState<ReadonlySet<string>>(new Set());
 
   async function refreshNotifications() {
     try {
@@ -116,7 +134,18 @@ export function InboxView({
       );
       await refreshChanges();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "The change could not be applied.");
+      if (err instanceof ForwardError && err.status === 409) {
+        // The log marks the row reversible, but the engine refused to replay
+        // its inverse op. Flip the card to review-only instead of a red error.
+        setBlocked((prev) => new Set(prev).add(change.id));
+        setNotice(
+          `This ${change.target_kind} change can't be reversed here — marked review-only.`,
+        );
+      } else {
+        setError(
+          err instanceof Error ? err.message : "The change could not be applied.",
+        );
+      }
     } finally {
       setBusy(null);
     }
@@ -199,7 +228,12 @@ export function InboxView({
           onAnswer={answer}
         />
       ) : (
-        <ChangesList changes={changes} busyId={busy} onOp={changeOp} />
+        <ChangesList
+          changes={changes}
+          busyId={busy}
+          onOp={changeOp}
+          blockedIds={blocked}
+        />
       )}
     </div>
   );

@@ -5,6 +5,13 @@ export interface ChangesListProps {
   changes: Change[];
   busyId: string | null;
   onOp: (change: Change, op: "undo" | "redo") => void;
+  /**
+   * Ids the upstream engine reported it cannot replay (a 409 on undo/redo).
+   * The row is `reversible` in the log, but its inverse op was recorded by a
+   * flow FG-12 does not know how to reverse, so we drop the button and show it
+   * as review-only rather than offering an action that can never succeed.
+   */
+  blockedIds?: ReadonlySet<string>;
 }
 
 /**
@@ -13,7 +20,12 @@ export interface ChangesListProps {
  * review but expose no action (D6 is enforced upstream; the button is simply
  * absent). Visibility (C2) already scoped the list server-side.
  */
-export function ChangesList({ changes, busyId, onOp }: ChangesListProps) {
+export function ChangesList({
+  changes,
+  busyId,
+  onOp,
+  blockedIds,
+}: ChangesListProps) {
   if (changes.length === 0) {
     return (
       <section
@@ -29,6 +41,7 @@ export function ChangesList({ changes, busyId, onOp }: ChangesListProps) {
     <section data-component="ChangesList" className="flex flex-col gap-3">
       {changes.map((change) => {
         const busy = busyId === change.id;
+        const blocked = blockedIds?.has(change.id) ?? false;
         return (
           <article
             key={change.id}
@@ -48,7 +61,7 @@ export function ChangesList({ changes, busyId, onOp }: ChangesListProps) {
               by {change.actor_user_id ?? "unknown"} · {change.mode}
             </p>
 
-            {change.reversible ? (
+            {change.reversible && !blocked ? (
               change.undone ? (
                 <button
                   type="button"
@@ -70,7 +83,9 @@ export function ChangesList({ changes, busyId, onOp }: ChangesListProps) {
               )
             ) : (
               <p className="text-xs text-[var(--color-muted)]">
-                Not reversible — review only.
+                {blocked
+                  ? "Not reversible here — review only."
+                  : "Not reversible — review only."}
               </p>
             )}
           </article>
