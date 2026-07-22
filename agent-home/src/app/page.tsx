@@ -97,7 +97,10 @@ export default async function HomePage() {
         </p>
       </section>
 
-      <nav data-component="HomeLinks" className="mt-4 flex flex-col gap-2">
+      <nav
+        data-component="HomeLinks"
+        className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2"
+      >
         <Link
           href="/onboarding"
           data-component="OnboardingLink"

@@ -65,7 +65,7 @@ export function ToolsRegistry({ data }: { data: ToolsResponse }) {
             {enabled.length === 0 ? (
               <p className="text-sm text-[var(--color-muted)]">None enabled.</p>
             ) : (
-              <ul className="flex flex-col gap-2">
+              <ul className="grid grid-cols-1 gap-2 lg:grid-cols-2">
                 {enabled.map((tool) => (
                   <ToolRow key={tool.id} tool={tool} />
                 ))}
@@ -80,7 +80,7 @@ export function ToolsRegistry({ data }: { data: ToolsResponse }) {
             {disabled.length === 0 ? (
               <p className="text-sm text-[var(--color-muted)]">None disabled.</p>
             ) : (
-              <ul className="flex flex-col gap-2">
+              <ul className="grid grid-cols-1 gap-2 lg:grid-cols-2">
                 {disabled.map((tool) => (
                   <ToolRow key={tool.id} tool={tool} />
                 ))}

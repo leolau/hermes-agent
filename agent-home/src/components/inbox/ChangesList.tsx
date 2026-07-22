@@ -38,7 +38,10 @@ export function ChangesList({
   }
 
   return (
-    <section data-component="ChangesList" className="flex flex-col gap-3">
+    <section
+      data-component="ChangesList"
+      className="grid grid-cols-1 gap-3 lg:grid-cols-2"
+    >
       {changes.map((change) => {
         const busy = busyId === change.id;
         const blocked = blockedIds?.has(change.id) ?? false;

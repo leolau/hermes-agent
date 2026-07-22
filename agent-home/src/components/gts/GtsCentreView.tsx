@@ -273,9 +273,11 @@ export function GtsCentreView({ graph }: { graph: GtsGraphResponse }) {
       {topGoals.length === 0 ? (
         <InfoCard>No goals visible in your scope yet.</InfoCard>
       ) : (
-        topGoals.map((goal) => (
-          <GoalCard key={goal.id} goal={goal} index={index} depth={0} />
-        ))
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+          {topGoals.map((goal) => (
+            <GoalCard key={goal.id} goal={goal} index={index} depth={0} />
+          ))}
+        </div>
       )}
       <p className="text-xs text-[var(--color-muted)]">
         Read-only · GTS Centre (C9). Assignment: {graph.assignment.scheme}
