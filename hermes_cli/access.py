@@ -311,6 +311,7 @@ def scope_filter(
 
 
 _VALID_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+_VALID_SCHEMA = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +346,20 @@ CREATE TABLE IF NOT EXISTS channel_identities (
 );
 CREATE INDEX IF NOT EXISTS channel_identities_user
     ON channel_identities (user_id);
+
+-- Login-subject aliases: map an auth provider's stable subject id (e.g. a
+-- Supabase/GoTrue ``sub`` UUID) onto an existing principal whose ``user_id``
+-- is *not* that subject. New members are enrolled with their subject *as* the
+-- user_id and need no alias; this table exists for principals enrolled before
+-- the auth provider (the bootstrap owner) so their web login still resolves to
+-- them without re-keying historical rows.
+CREATE TABLE IF NOT EXISTS principal_aliases (
+    alias_subject TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES principals(user_id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS principal_aliases_user
+    ON principal_aliases (user_id);
 """
 
 
@@ -451,6 +466,60 @@ async def bind_principal(
         principal.user_id,
         _GUC_ROLE,
         principal.role,
+    )
+
+
+#: The least-privilege application role. It has DML on the app schema but is
+#: ``NOBYPASSRLS``/``NOSUPERUSER``, so the C2 read policies actually fire when a
+#: request runs under it (``SET LOCAL ROLE``). The privileged login role that
+#: owns the schema keeps doing DDL/migrations; only request-serving paths drop
+#: to this role after binding a principal.
+APP_ROLE_NAME = "hermes_app"
+
+
+async def ensure_app_role(
+    connection: asyncpg.Connection,
+    schema: str,
+    *,
+    role_name: str = APP_ROLE_NAME,
+) -> None:
+    """Provision the least-privilege, non-BYPASSRLS app role (idempotent).
+
+    Creates ``role_name`` (``NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE``),
+    grants it ``USAGE`` on ``schema`` and DML on the schema's current + future
+    tables/sequences, and grants membership to the current (privileged) login
+    role so a request-serving connection can ``SET LOCAL ROLE`` to it.
+
+    This is the DB half of the security foundation: the RLS policies installed
+    by :func:`apply_scope_rls` are inert against a ``BYPASSRLS`` connection, so
+    a request must run its queries under this role for the database to enforce
+    C2 visibility as defense-in-depth on top of the app-layer
+    :func:`scope_filter`.
+    """
+    if not _VALID_COLUMN.fullmatch(role_name):
+        raise ValueError(f"Invalid role name: {role_name!r}")
+    if not _VALID_SCHEMA.fullmatch(schema):
+        raise ValueError(f"Invalid schema name: {schema!r}")
+    await connection.execute(
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role_name}')
+            THEN
+                CREATE ROLE {role_name}
+                    NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB;
+            END IF;
+        END $$;
+        GRANT USAGE ON SCHEMA {schema} TO {role_name};
+        GRANT SELECT, INSERT, UPDATE, DELETE
+            ON ALL TABLES IN SCHEMA {schema} TO {role_name};
+        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema} TO {role_name};
+        ALTER DEFAULT PRIVILEGES IN SCHEMA {schema}
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role_name};
+        ALTER DEFAULT PRIVILEGES IN SCHEMA {schema}
+            GRANT USAGE, SELECT ON SEQUENCES TO {role_name};
+        GRANT {role_name} TO CURRENT_USER;
+        """
     )
 
 
@@ -624,6 +693,71 @@ class PrincipalStore:
                 channel_user_id,
                 user_id,
             )
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def link_alias(
+        self,
+        alias_subject: str,
+        user_id: str,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> None:
+        """Map an auth-provider login subject onto an existing principal.
+
+        ``alias_subject`` is the stable subject the auth provider puts in the
+        verified session (e.g. a Supabase/GoTrue ``sub`` UUID). ``user_id`` is
+        the principal it should resolve to. Re-linking the same subject
+        repoints it (idempotent upsert). The principal must already exist (the
+        FK enforces this).
+        """
+        alias_subject = (alias_subject or "").strip()
+        if not alias_subject:
+            raise ValueError("alias_subject cannot be empty")
+        user_id = _validate_user_id(user_id)
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            await conn.execute(
+                """
+                INSERT INTO principal_aliases (alias_subject, user_id)
+                VALUES ($1, $2)
+                ON CONFLICT (alias_subject)
+                DO UPDATE SET user_id = EXCLUDED.user_id
+                """,
+                alias_subject,
+                user_id,
+            )
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def resolve_alias(
+        self,
+        alias_subject: str,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> str | None:
+        """Return the principal ``user_id`` a login subject aliases to, else None.
+
+        A subject with no alias row resolves to ``None`` — the caller then
+        treats the subject *itself* as the principal ``user_id`` (the common
+        case: a member enrolled with their subject as their user_id).
+        """
+        alias_subject = (alias_subject or "").strip()
+        if not alias_subject:
+            return None
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            row = await conn.fetchrow(
+                "SELECT user_id FROM principal_aliases WHERE alias_subject = $1",
+                alias_subject,
+            )
+            return str(row["user_id"]) if row is not None else None
         finally:
             if own_connection:
                 await conn.close()
