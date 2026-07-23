@@ -277,6 +277,47 @@ async def test_transfer_to_unknown_or_dev_is_rejected(postgres_dsn: str) -> None
 
 
 @pytest.mark.asyncio
+async def test_list_principals_orders_owner_first(postgres_dsn: str) -> None:
+    await _reset(postgres_dsn)
+    store = PrincipalStore(get_store("supabase-app", "prod", config=_config(postgres_dsn)))
+    await store.enroll("root", display="Root", role="owner")
+    await store.enroll("vic", display="Vic", role="viewer")
+    await store.enroll("mem", display="Mem", role="member")
+    await store.enroll("adm", display="Adm", role="admin")
+
+    listed = await store.list_principals()
+    assert [p.role for p in listed] == ["owner", "admin", "member", "viewer"]
+    assert [p.user_id for p in listed] == ["root", "adm", "mem", "vic"]
+
+
+@pytest.mark.asyncio
+async def test_set_role_changes_member_and_guards_owner(postgres_dsn: str) -> None:
+    await _reset(postgres_dsn)
+    store = PrincipalStore(get_store("supabase-app", "prod", config=_config(postgres_dsn)))
+    await store.enroll("root", display="Root", role="owner")
+    await store.enroll("mem", display="Mem", role="member")
+
+    promoted = await store.set_role("mem", "admin")
+    assert promoted.role == "admin"
+    reread = await store.get("mem")
+    assert reread is not None and reread.role == "admin"
+
+    # The owner's role cannot be changed through set_role (transfer only) …
+    with pytest.raises(ValueError, match="owner"):
+        await store.set_role("root", "admin")
+    # … and set_role never grants the owner role …
+    with pytest.raises(ValueError, match="owner"):
+        await store.set_role("mem", "owner")
+    # … and an unknown principal is a KeyError.
+    with pytest.raises(KeyError):
+        await store.set_role("ghost", "member")
+
+    # The single-owner invariant still holds.
+    owner = await store.get_owner()
+    assert owner is not None and owner.user_id == "root"
+
+
+@pytest.mark.asyncio
 async def test_rls_enforces_private_scope_at_the_database(postgres_dsn: str) -> None:
     """Negative access test enforced by Postgres RLS, not just the app layer.
 

@@ -1375,3 +1375,14 @@ updates:
 # This provider NEVER performs signup — it only logs existing members in.
 # Disable open signup at the GoTrue server itself (GOTRUE_DISABLE_SIGNUP=true)
 # so new accounts can only be created by an admin.
+#
+# Member management ('hermes member' + the owner/admin-only /api/comms/members
+# API) creates those accounts through GoTrue's *admin* API. That reuses the url
+# above and additionally needs the GoTrue SERVICE-ROLE key — which can mint and
+# delete any account, so it is a CREDENTIAL: put it in ~/.hermes/.env (or the
+# process env), NEVER in config.yaml and NEVER in a browser. Recognised names
+# (first non-empty wins):
+#
+#   HERMES_DASHBOARD_SUPABASE_SERVICE_ROLE_KEY
+#   HERMES_SUPABASE_SERVICE_ROLE_KEY
+#   SUPABASE_SERVICE_ROLE_KEY  /  SUPABASE_SERVICE_KEY

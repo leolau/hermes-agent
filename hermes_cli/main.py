@@ -12668,6 +12668,13 @@ def main():
     register_owner_subparser(subparsers)
 
     # =========================================================================
+    # member command — owner/admin management of additional members (C1)
+    # =========================================================================
+    from hermes_cli.member import register_member_subparser
+
+    register_member_subparser(subparsers)
+
+    # =========================================================================
     # changes command — review/undo/redo recorded change events (C5/FG-12)
     # =========================================================================
     from hermes_cli.changes_cli import register_changes_subparser
