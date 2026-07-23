@@ -1345,3 +1345,33 @@ updates:
 #       # This is a CREDENTIAL: prefer setting HERMES_DASHBOARD_OIDC_CLIENT_SECRET
 #       # in ~/.hermes/.env over putting it here in config.yaml.
 #       #   client_secret: ""
+#
+# -----------------------------------------------------------------------------
+# Supabase (GoTrue) email/password dashboard auth. Use this to gate the
+# dashboard / agent-home with a self-hosted Supabase Auth server: members sign
+# in with an email + password, GoTrue owns the password hashing, and the
+# verified user UUID (the JWT 'sub') becomes the Hermes principal id used by the
+# multi-user RLS layer. The bundled 'supabase' plugin verifies GoTrue access
+# tokens locally (HS256, the shared jwt_secret). Each setting can be overridden
+# by an environment variable (env wins when non-empty); the bare SUPABASE_* /
+# GOTRUE_JWT_SECRET names are recognised as fallbacks so a box that already
+# exports them for the Python backend needs no duplicate HERMES_-prefixed vars:
+#
+#   dashboard.supabase_auth.url         <-  HERMES_DASHBOARD_SUPABASE_URL       (fallback: SUPABASE_URL)
+#   dashboard.supabase_auth.anon_key    <-  HERMES_DASHBOARD_SUPABASE_ANON_KEY  (fallback: SUPABASE_ANON_KEY)
+#   dashboard.supabase_auth.jwt_secret  <-  HERMES_DASHBOARD_SUPABASE_JWT_SECRET (fallback: SUPABASE_JWT_SECRET, GOTRUE_JWT_SECRET)
+#   dashboard.supabase_auth.audience    <-  HERMES_DASHBOARD_SUPABASE_AUDIENCE
+#
+# dashboard:
+#   supabase_auth:
+#     url: "https://supabase.example.com"   # required; GoTrue base (Kong)
+#     anon_key: "<supabase anon key>"        # required; sent as the apikey header
+#     audience: "authenticated"              # optional; GoTrue default
+#
+#     # jwt_secret verifies the access token — it is a CREDENTIAL, so prefer
+#     # HERMES_DASHBOARD_SUPABASE_JWT_SECRET in ~/.hermes/.env over config.yaml.
+#     #   jwt_secret: "<GoTrue GOTRUE_JWT_SECRET>"
+#
+# This provider NEVER performs signup — it only logs existing members in.
+# Disable open signup at the GoTrue server itself (GOTRUE_DISABLE_SIGNUP=true)
+# so new accounts can only be created by an admin.

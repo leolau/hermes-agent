@@ -1,0 +1,9 @@
+name: supabase
+version: 1.0.0
+description: "Dashboard auth provider — email/password via self-hosted Supabase Auth (GoTrue). Authenticates against GoTrue's password grant (POST /auth/v1/token?grant_type=password), verifies the returned access-token JWT locally (HS256, GoTrue's shared jwt_secret), and refreshes via the refresh grant. The verified 'sub' (Supabase user UUID) becomes the session user_id, which the multi-user principal layer resolves to a Hermes principal. Auto-activates when a url + anon_key + jwt_secret are configured under dashboard.supabase_auth in config.yaml (canonical surface) or via the HERMES_DASHBOARD_SUPABASE_* env vars (SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_JWT_SECRET recognised as fallbacks). Signup is never performed by this provider; disable open signup at the GoTrue server (GOTRUE_DISABLE_SIGNUP=true) so members can only be created by an admin."
+author: NousResearch
+kind: backend
+requires_env:
+  - HERMES_DASHBOARD_SUPABASE_URL
+  - HERMES_DASHBOARD_SUPABASE_ANON_KEY
+  - HERMES_DASHBOARD_SUPABASE_JWT_SECRET
