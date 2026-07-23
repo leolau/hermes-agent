@@ -27,6 +27,7 @@ from hermes_cli.access import (
     Role,
     apply_scope_rls,
     bind_principal,
+    ensure_app_role,
     private,
     resolve_principal,
 )
@@ -337,3 +338,190 @@ async def test_rls_enforces_private_scope_at_the_database(postgres_dsn: str) -> 
         assert await visible_ids("root", "owner") == [1, 2, 3]
     finally:
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_link_and_resolve_alias(postgres_dsn: str) -> None:
+    """A login subject maps to an existing principal; unknown → None."""
+    await _reset(postgres_dsn)
+    store = PrincipalStore(
+        get_store("supabase-app", "prod", config=_config(postgres_dsn))
+    )
+    await store.enroll("leo_owner", display="Leo", role="owner")
+
+    subject = "a1b2c3d4-0000-4000-8000-000000000001"
+    assert await store.resolve_alias(subject) is None  # no alias yet
+
+    await store.link_alias(subject, "leo_owner")
+    assert await store.resolve_alias(subject) == "leo_owner"
+
+    # Re-linking the same subject repoints it (idempotent upsert).
+    await store.enroll("carol", display="Carol", role="member")
+    await store.link_alias(subject, "carol")
+    assert await store.resolve_alias(subject) == "carol"
+
+    # An unknown subject still resolves to nothing.
+    assert await store.resolve_alias("no-such-subject") is None
+    # Aliasing to a non-existent principal is rejected by the FK.
+    with pytest.raises(asyncpg.exceptions.ForeignKeyViolationError):
+        await store.link_alias("x", "ghost")
+
+
+@pytest.mark.asyncio
+async def test_app_role_is_least_privilege_and_enforces_rls(
+    postgres_dsn: str,
+) -> None:
+    """``ensure_app_role`` yields a NOBYPASSRLS role that RLS actually binds.
+
+    Proves item (a): a request that runs under ``hermes_app`` (after binding a
+    principal) has C2 visibility enforced by Postgres — a member cannot read
+    another member's ``private:`` rows even at the database boundary, and the
+    role genuinely cannot bypass RLS.
+    """
+    await _reset(postgres_dsn)
+    store = get_store("supabase-app", "dev", config=_config(postgres_dsn))
+    conn = await store.connect()
+    try:
+        await conn.execute(
+            """
+            CREATE TABLE memories (
+                id INTEGER PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                visibility TEXT NOT NULL,
+                body TEXT NOT NULL
+            )
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO memories (id, owner_user_id, visibility, body) VALUES
+                (1, 'root', 'shared', 'org note'),
+                (2, 'alice', $1, 'alice secret'),
+                (3, 'bob', $2, 'bob secret')
+            """,
+            private("alice"),
+            private("bob"),
+        )
+        await apply_scope_rls(conn, "memories")
+
+        await ensure_app_role(conn, store.schema)
+
+        # The role must be non-BYPASSRLS / non-superuser — else RLS is inert.
+        flags = await conn.fetchrow(
+            "SELECT rolbypassrls, rolsuper, rolcanlogin "
+            "FROM pg_roles WHERE rolname = 'hermes_app'"
+        )
+        assert flags["rolbypassrls"] is False
+        assert flags["rolsuper"] is False
+        assert flags["rolcanlogin"] is False
+
+        async def visible_ids(user_id: str, role: Role) -> list[int]:
+            principal = Principal(user_id=user_id, display=user_id, role=role)
+            async with conn.transaction():
+                await conn.execute("SET LOCAL ROLE hermes_app")
+                await bind_principal(conn, principal)
+                rows = await conn.fetch("SELECT id FROM memories ORDER BY id")
+                return [r["id"] for r in rows]
+
+        assert await visible_ids("alice", "member") == [1, 2]
+        assert await visible_ids("bob", "member") == [1, 3]
+        assert await visible_ids("root", "owner") == [1, 2, 3]
+    finally:
+        await conn.close()
+
+
+class _FakeQuery:
+    def __init__(self, values: dict[str, str]) -> None:
+        self._values = values
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        return self._values.get(key, default)
+
+
+class _FakeState:
+    pass
+
+
+class _FakeSession:
+    def __init__(self, user_id: str) -> None:
+        self.user_id = user_id
+
+
+class _FakeRequest:
+    """Minimal Starlette-Request stand-in for _comms_resolve_principal."""
+
+    def __init__(
+        self,
+        *,
+        subject: str | None = None,
+        query: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.state = _FakeState()
+        if subject is not None:
+            self.state.session = _FakeSession(subject)
+        self.query_params = _FakeQuery(query or {})
+        self.headers = _FakeQuery(headers or {})
+
+
+@pytest.mark.asyncio
+async def test_comms_resolve_principal_binds_logged_in_identity(
+    postgres_dsn: str, monkeypatch
+) -> None:
+    """The web resolver returns the *logged-in* principal, not always owner."""
+    from hermes_cli import web_server as ws
+
+    await _reset(postgres_dsn)
+    store = get_store("supabase-app", "prod", config=_config(postgres_dsn))
+    principals = PrincipalStore(store)
+    await principals.enroll("leo_owner", display="Leo", role="owner")
+    await principals.enroll("bob", display="Bob", role="member")
+    await principals.enroll("adm", display="Adm", role="admin")
+    owner_subject = "sub-owner-uuid"
+    await principals.link_alias(owner_subject, "leo_owner")
+
+    monkeypatch.setattr(ws, "_comms_app_store", lambda: store)
+
+    # Owner logs in via their aliased subject → resolves to the owner.
+    owner = await ws._comms_resolve_principal(
+        _FakeRequest(subject=owner_subject), allow_as=True
+    )
+    assert owner.user_id == "leo_owner" and owner.is_owner
+
+    # A member logs in with their subject-as-user_id → resolves to themselves,
+    # for reads AND writes (allow_as=False path).
+    member = await ws._comms_resolve_principal(
+        _FakeRequest(subject="bob"), allow_as=False
+    )
+    assert member.user_id == "bob" and member.role == "member"
+
+    # A member's ?as= is ignored — they only ever see themselves.
+    still_bob = await ws._comms_resolve_principal(
+        _FakeRequest(subject="bob", query={"as": "leo_owner"}), allow_as=True
+    )
+    assert still_bob.user_id == "bob"
+
+    # Owner/admin ?as= narrows the read view to the requested principal.
+    narrowed = await ws._comms_resolve_principal(
+        _FakeRequest(subject=owner_subject, query={"as": "bob"}), allow_as=True
+    )
+    assert narrowed.user_id == "bob"
+    admin_narrowed = await ws._comms_resolve_principal(
+        _FakeRequest(subject="adm", query={"as": "bob"}), allow_as=True
+    )
+    assert admin_narrowed.user_id == "bob"
+
+    # An authenticated subject with no enrolled principal fails closed (409).
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as excinfo:
+        await ws._comms_resolve_principal(
+            _FakeRequest(subject="unknown-subject"), allow_as=False
+        )
+    assert excinfo.value.status_code == 409
+
+    # No interactive session → owner-operator fallback.
+    fallback = await ws._comms_resolve_principal(
+        _FakeRequest(subject=None), allow_as=True
+    )
+    assert fallback.user_id == "leo_owner"

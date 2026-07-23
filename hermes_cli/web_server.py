@@ -3051,31 +3051,57 @@ def _comms_app_store():
     return get_store("supabase-app", "prod", config=load_config() or {})
 
 
+def _comms_session_subject(request: "Request") -> str:
+    """The verified login subject of the current request, or ``""``.
+
+    The dashboard-auth gate attaches the verified :class:`Session` to
+    ``request.state.session`` on every interactive request it lets through; its
+    ``user_id`` is the auth provider's stable subject (e.g. a Supabase/GoTrue
+    ``sub``). Returns ``""`` for a request with no interactive session (a
+    token-authed service caller, an internal call, or a test client) so the
+    caller can fall back to the owner-operator identity.
+    """
+    # ``request.state`` raises AttributeError for an unset attribute, so the
+    # default-valued ``getattr`` is the idiomatic presence check here.
+    session = getattr(request.state, "session", None)
+    if session is None:
+        return ""
+    return (session.user_id or "").strip()
+
+
 async def _comms_resolve_principal(request: "Request", *, allow_as: bool = False):
     """Resolve the C1 principal a web request acts under (contract C1).
 
-    Trust model: the dashboard is an **owner-privileged operator surface** — it
-    is already gated by dashboard auth and exposes owner-level control (config,
-    secrets, every session), so an authenticated request is the machine
-    operator, who maps to the enrolled **owner** principal. That is the default
-    and the only identity permitted to *act* (write).
+    Identity binding: a request carrying a verified interactive session
+    (``request.state.session``, attached by the dashboard-auth gate) acts as
+    **its own** principal — the logged-in user, for reads *and* writes. The
+    session's subject is mapped to a principal via the ``principal_aliases``
+    table when one exists (the bootstrap owner, enrolled before the auth
+    provider) and otherwise used directly as the ``user_id`` (the common case:
+    a member enrolled with their subject as their user_id). An authenticated
+    subject that maps to no enrolled principal is a 409 — never silently
+    upgraded to the owner.
 
-    ``allow_as`` (read-only endpoints only) lets the owner-operator narrow the
-    C2 view to a specific principal via ``?as=`` / ``X-Hermes-User-Id`` — an
-    inspection aid, never an escalation: the owner can already read every row,
-    so scoping *down* to a member's view exposes nothing new. Write endpoints
-    pass ``allow_as=False`` so a mutation is always attributed to the owner and
-    can never spoof another principal's identity. (Per-web-user *sub-owner*
-    identity — binding a non-owner dashboard login to its own C1 principal — is
-    deferred to the dashboard-auth/enrollment work that owns that mapping.)
+    Fallback: a request with **no** interactive session (an internal caller, a
+    token-authed service, or a test client) resolves to the enrolled **owner**
+    — the owner-operator identity for the machine-operator surface.
+
+    ``allow_as`` (read-only endpoints only) lets an **owner or admin** narrow
+    the C2 view to a specific principal via ``?as=`` / ``X-Hermes-User-Id`` — an
+    inspection aid, never an escalation (they may already read every row, so
+    scoping *down* exposes nothing new). A member/viewer's ``?as=`` is ignored:
+    they only ever see themselves. Write endpoints pass ``allow_as=False`` so a
+    mutation is always attributed to the acting principal and can never spoof
+    another identity.
 
     Never invents a principal: an unknown ``?as=`` id is a 404, and a machine
-    with no owner enrolled is a 409.
+    with no principal to resolve is a 409.
     """
     from hermes_cli.access import PrincipalStore
 
     store = _comms_app_store()
     principals = PrincipalStore(store)
+    subject = _comms_session_subject(request)
     requested = ""
     if allow_as:
         requested = (
@@ -3084,20 +3110,39 @@ async def _comms_resolve_principal(request: "Request", *, allow_as: bool = False
             or ""
         ).strip()
     try:
-        owner = await principals.get_owner()
-        if owner is None:
-            raise HTTPException(
-                status_code=409,
-                detail="No owner is enrolled yet; complete multi-user setup first.",
-            )
-        if requested and requested != owner.user_id:
+        if subject:
+            user_id = await principals.resolve_alias(subject) or subject
+            actor = await principals.get(user_id)
+            if actor is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Authenticated, but no principal is enrolled for this "
+                        "user."
+                    ),
+                )
+        else:
+            actor = await principals.get_owner()
+            if actor is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "No owner is enrolled yet; complete multi-user setup "
+                        "first."
+                    ),
+                )
+        # ?as= narrowing is an owner/admin-only read aid; ignored for others.
+        if requested and requested != actor.user_id and actor.role in (
+            "owner",
+            "admin",
+        ):
             principal = await principals.get(requested)
             if principal is None:
                 raise HTTPException(
                     status_code=404, detail=f"No such principal: {requested}"
                 )
             return principal
-        return owner
+        return actor
     except HTTPException:
         raise
     except RuntimeError as exc:
