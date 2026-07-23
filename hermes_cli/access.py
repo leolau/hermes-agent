@@ -668,6 +668,94 @@ class PrincipalStore:
             if own_connection:
                 await conn.close()
 
+    async def list_principals(
+        self,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> list[Principal]:
+        """Return every enrolled principal (owner first), with channels.
+
+        Ordered owner → admin → member → viewer, then by enrolment time, so a
+        management UI/CLI lists the most privileged accounts first.
+        """
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            rows = await conn.fetch(
+                """
+                SELECT user_id, display, role, created_at
+                FROM principals
+                ORDER BY
+                    CASE role
+                        WHEN 'owner' THEN 0
+                        WHEN 'admin' THEN 1
+                        WHEN 'member' THEN 2
+                        ELSE 3
+                    END,
+                    created_at,
+                    user_id
+                """
+            )
+            result: list[Principal] = []
+            for row in rows:
+                channels = await self._channels_for(conn, str(row["user_id"]))
+                result.append(_row_to_principal(row, channels))
+            return result
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def set_role(
+        self,
+        user_id: str,
+        role: Role,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> Principal:
+        """Change an enrolled principal's role (never touching ``owner``).
+
+        Guards the single-owner invariant: this path refuses to *grant* the
+        ``owner`` role and refuses to change the *current owner's* role — both
+        go through the approval-gated :meth:`transfer_owner` instead, so the
+        partial unique index can never be tripped from member management. Raises
+        :class:`KeyError` for an unknown principal.
+        """
+        user_id = _validate_user_id(user_id)
+        if role not in ROLES:
+            raise ValueError(f"Unknown role: {role!r}")
+        if role == _OWNER_ROLE:
+            raise ValueError(
+                "Cannot promote to owner here; use 'hermes owner transfer'."
+            )
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            current = await conn.fetchrow(
+                "SELECT role FROM principals WHERE user_id = $1", user_id
+            )
+            if current is None:
+                raise KeyError(f"No such principal: {user_id}")
+            if current["role"] == _OWNER_ROLE:
+                raise ValueError(
+                    "Cannot change the owner's role here; use "
+                    "'hermes owner transfer' to hand off ownership first."
+                )
+            row = await conn.fetchrow(
+                """
+                UPDATE principals SET role = $2 WHERE user_id = $1
+                RETURNING user_id, display, role, created_at
+                """,
+                user_id,
+                role,
+            )
+            channels = await self._channels_for(conn, user_id)
+            return _row_to_principal(row, channels)
+        finally:
+            if own_connection:
+                await conn.close()
+
     async def link_channel(
         self,
         user_id: str,

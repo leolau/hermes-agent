@@ -3174,6 +3174,167 @@ async def comms_whoami(request: Request):
     }
 
 
+async def _comms_member_service(request: "Request"):
+    """Resolve (actor, MemberService) for an owner/admin member-mgmt request.
+
+    Reuses :func:`_comms_resolve_principal` to bind the acting principal, then
+    enforces the owner/admin gate and builds a :class:`MemberService` over the
+    GoTrue admin client. Raises ``HTTPException`` 403 for a non-admin actor and
+    503 when member management isn't configured (no service-role key / url).
+    """
+    from hermes_cli.members import (
+        MemberService,
+        load_admin_client,
+        require_member_admin,
+    )
+
+    actor = await _comms_resolve_principal(request)
+    try:
+        require_member_admin(actor)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    admin = load_admin_client()
+    if admin is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Member management is not configured on this server.",
+        )
+    from hermes_cli.access import PrincipalStore
+
+    service = MemberService(PrincipalStore(_comms_app_store()), admin)
+    return actor, service
+
+
+def _comms_member_error(exc: Exception) -> "HTTPException":
+    """Map a member-service error onto the right HTTP status."""
+    from hermes_cli.members import MemberConflictError, MemberError
+
+    if isinstance(exc, MemberConflictError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, MemberError):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/comms/members")
+async def comms_list_members(request: Request):
+    """List enrolled members (owner/admin only)."""
+    try:
+        _actor, service = await _comms_member_service(request)
+        members = await service.list_members(_actor)
+    except _CommsNotConfigured:
+        return {"configured": False, "members": []}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {"configured": True, "members": [m.as_dict() for m in members]}
+
+
+@app.post("/api/comms/members")
+async def comms_create_member(request: Request):
+    """Create a Supabase account and enrol it as a principal (owner/admin)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    email = str(body.get("email", "")).strip()
+    password = str(body.get("password", ""))
+    display = str(body.get("display", "")).strip()
+    role = str(body.get("role", "member")).strip() or "member"
+    try:
+        actor, service = await _comms_member_service(request)
+        principal = await service.create_member(
+            actor,
+            email=email,
+            password=password,
+            display=display,
+            role=role,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {
+        "ok": True,
+        "member": {
+            "user_id": principal.user_id,
+            "display": principal.display,
+            "role": principal.role,
+        },
+    }
+
+
+@app.put("/api/comms/members/{user_id}/role")
+async def comms_set_member_role(user_id: str, request: Request):
+    """Change a member's role (owner/admin; never the owner, never to owner)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    role = str((body or {}).get("role", "")).strip()
+    if not role:
+        raise HTTPException(status_code=400, detail="role is required")
+    try:
+        actor, service = await _comms_member_service(request)
+        principal = await service.set_member_role(
+            actor, user_id=user_id, role=role
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {"ok": True, "member": {"user_id": principal.user_id, "role": principal.role}}
+
+
+@app.post("/api/comms/members/{user_id}/password")
+async def comms_set_member_password(user_id: str, request: Request):
+    """Reset a member's temporary password (owner/admin only)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    password = str((body or {}).get("password", ""))
+    if not password:
+        raise HTTPException(status_code=400, detail="password is required")
+    try:
+        actor, service = await _comms_member_service(request)
+        await service.set_member_password(
+            actor, user_id=user_id, password=password
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {"ok": True}
+
+
+@app.post("/api/comms/members/{user_id}/deactivate")
+async def comms_deactivate_member(user_id: str, request: Request):
+    """Block a member's login without deleting the account (owner/admin)."""
+    return await _comms_set_member_active(user_id, request, active=False)
+
+
+@app.post("/api/comms/members/{user_id}/activate")
+async def comms_activate_member(user_id: str, request: Request):
+    """Restore a deactivated member's login (owner/admin only)."""
+    return await _comms_set_member_active(user_id, request, active=True)
+
+
+async def _comms_set_member_active(user_id: str, request: "Request", *, active: bool):
+    try:
+        actor, service = await _comms_member_service(request)
+        await service.set_member_active(actor, user_id=user_id, active=active)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {"ok": True, "active": active}
+
+
 @app.get("/api/comms/notifications")
 async def comms_list_notifications(request: Request):
     """List pending approvals + proactive asks visible to the principal (C2)."""
