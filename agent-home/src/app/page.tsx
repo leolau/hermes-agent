@@ -101,6 +101,24 @@ export default async function HomePage() {
         data-component="HomeLinks"
         className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2"
       >
+        {principal.role === "owner" || principal.role === "admin" ? (
+          <Link
+            href="/members"
+            data-component="MembersLink"
+            className="flex items-center justify-between rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 active:opacity-70"
+          >
+            <span>
+              <span className="block text-sm font-medium">Members</span>
+              <span className="block text-xs text-[var(--color-muted)]">
+                Create &amp; manage members (owner/admin)
+              </span>
+            </span>
+            <span aria-hidden className="text-[var(--color-muted)]">
+              ›
+            </span>
+          </Link>
+        ) : null}
+
         <Link
           href="/onboarding"
           data-component="OnboardingLink"

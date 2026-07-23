@@ -450,6 +450,47 @@ export interface ChangeOpResponse {
 }
 
 /**
+ * A brain member (mirror of `members.MemberView.as_dict`): an enrolled
+ * principal joined with its Supabase (GoTrue) account state. `email`/`active`
+ * come from GoTrue — `email` is blank and `active` is `true` for a principal
+ * GoTrue doesn't know (e.g. the bootstrap owner enrolled before Supabase);
+ * `active` is `false` when the account is deactivated (banned).
+ */
+export interface Member {
+  user_id: string;
+  display: string;
+  role: Role;
+  email: string;
+  active: boolean;
+  channels: string[];
+  is_owner: boolean;
+}
+
+/** `GET /api/comms/members`: the enrolled members (owner/admin only). */
+export interface MembersResponse {
+  configured: boolean;
+  members: Member[];
+}
+
+/** `POST /api/comms/members`: the freshly created + enrolled member. */
+export interface MemberCreateResponse {
+  ok: boolean;
+  member: { user_id: string; display: string; role: Role };
+}
+
+/** `PUT /api/comms/members/{id}/role`: the re-roled member. */
+export interface MemberRoleResponse {
+  ok: boolean;
+  member: { user_id: string; role: Role };
+}
+
+/** Generic ack for password reset / (de)activation member mutations. */
+export interface MemberOkResponse {
+  ok: boolean;
+  active?: boolean;
+}
+
+/**
  * FG-17b agent-webview consent grant (mirror of `webview.WebviewScope`): the
  * domains the agent may act on and whether interactive actions are allowed.
  */

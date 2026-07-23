@@ -22,10 +22,15 @@ import type {
   ChatSendResponse,
   CoreManifestResponse,
   GtsGraphResponse,
+  MemberCreateResponse,
+  MemberOkResponse,
+  MemberRoleResponse,
+  MembersResponse,
   NotificationAnswerResponse,
   NotificationsResponse,
   OnboardingReadinessResponse,
   Principal,
+  Role,
   SessionCreateResponse,
   SessionsResponse,
   StoreMode,
@@ -309,6 +314,61 @@ export class HermesApiClient {
   async redoChange(changeRef: string): Promise<ChangeOpResponse> {
     return this.request(
       `/api/comms/changes/${encodeURIComponent(changeRef)}/redo`,
+      { method: "POST" },
+    );
+  }
+
+  // --- Member management (PR-4 e-frontend, owner/admin only) --------------
+  // The Python layer is the authority: it independently enforces the
+  // owner/admin guard and drives GoTrue + the principal store. These methods
+  // just forward; the service-role key never leaves the box.
+
+  /** List enrolled members joined with GoTrue account state (owner/admin). */
+  async members(): Promise<MembersResponse> {
+    return this.request("/api/comms/members");
+  }
+
+  /** Create a Supabase account + enrol it as a principal (owner/admin). */
+  async createMember(input: {
+    email: string;
+    password: string;
+    display?: string;
+    role?: Role;
+  }): Promise<MemberCreateResponse> {
+    return this.request("/api/comms/members", { method: "POST", json: input });
+  }
+
+  /** Change a member's role (never the owner; never to owner). */
+  async setMemberRole(userId: string, role: Role): Promise<MemberRoleResponse> {
+    return this.request(
+      `/api/comms/members/${encodeURIComponent(userId)}/role`,
+      { method: "PUT", json: { role } },
+    );
+  }
+
+  /** Reset a member's temporary password (owner/admin). */
+  async setMemberPassword(
+    userId: string,
+    password: string,
+  ): Promise<MemberOkResponse> {
+    return this.request(
+      `/api/comms/members/${encodeURIComponent(userId)}/password`,
+      { method: "POST", json: { password } },
+    );
+  }
+
+  /** Deactivate (ban) a member's login without deleting the account. */
+  async deactivateMember(userId: string): Promise<MemberOkResponse> {
+    return this.request(
+      `/api/comms/members/${encodeURIComponent(userId)}/deactivate`,
+      { method: "POST" },
+    );
+  }
+
+  /** Reactivate (unban) a previously-deactivated member's login. */
+  async activateMember(userId: string): Promise<MemberOkResponse> {
+    return this.request(
+      `/api/comms/members/${encodeURIComponent(userId)}/activate`,
       { method: "POST" },
     );
   }
